@@ -1,14 +1,23 @@
-# Welcome to Chainlit! 🚀🤖
+## ARPA-H BDF ICF Chatbot
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+### Scope
 
-## Useful Links 🔗
+Enables plain-language queries of biomedical data resources – such as CRDC, ProteomeXchange and Metabolomics Workbench. Provides context-aware insights rather than generic responses. Focuses on resource-specific capabilities instead of duplicating broad search functions.	
+### Possible Uses
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+- Identify relevant datasets
+- Explore cohort attributes
+- Investigate specific genes
+- Understand the protein expression data
+- Identify and integrate multi-modal data
+- Explore other data resources and data types
+- Perform correlation analysis	
+### Currenly available data sources
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
+- Proteomic Data Commons (PDC)
+- Genomic Data Commons (GDC)	
+### Limitations
 
-## Welcome screen
-
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+- **LLM Contextual Limitations:** All LLMs have a finite context window. Long or complex conversations might require truncation or summarization. 
+- **Visualization Complexity:** The scope of graph generation is limited to commonly used visualizations (e.g., bar charts, scatterplots, heatmaps). Complex custom visualizations are not be supported in the initial version.
+- **User Interface Platform:** The user interface is primarily designed for desktop use and may not be fully optimized for mobile devices. 

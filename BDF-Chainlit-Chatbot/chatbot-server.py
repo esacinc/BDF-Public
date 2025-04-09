@@ -1,16 +1,12 @@
 import chainlit as cl
-from chainlit.input_widget import Select, Switch, Slider
-import plotly.graph_objects as go
-import chainlit as cl
-from typing import Dict, Optional
-import chainlit as cl
+from chainlit.input_widget import Select, Slider
 from chainlit.data.dynamodb import DynamoDBDataLayer
 import boto3
 import chainlit.data as cl_data
 import json
 import os
 from llama_index.llms.bedrock_converse import BedrockConverse
-from llama_index.core.agent import FunctionCallingAgent, ReActAgent
+from llama_index.core.agent import FunctionCallingAgent
 from tools import tools
 from llama_index.retrievers.bedrock import AmazonKnowledgeBasesRetriever
 from io import StringIO
@@ -24,25 +20,25 @@ from llama_index.core.workflow import (
     StartEvent,
     StopEvent
 )
-from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.memory import ChatMemoryBuffer
-
-from llama_index.core.tools import FunctionTool
-from llama_index.core.agent import FunctionCallingAgent, ReActAgent
+from llama_index.core.agent import FunctionCallingAgent
 from llama_index.retrievers.bedrock import AmazonKnowledgeBasesRetriever
 
 from llama_index.core import get_response_synthesizer
 import pandas as pd
 from llama_index.llms.bedrock_converse import BedrockConverse
-from typing import Any, Awaitable, Optional, Callable, Type, List, Tuple, Union, cast
+from typing import Any
 import logger
+import authentication
 
-client = boto3.client('dynamodb',aws_access_key_id='', aws_secret_access_key='', region_name='')
-cl_data._data_layer = DynamoDBDataLayer(table_name="", client=client)
-PUBLICATIONS_KB_ID = "" 
-aws_access_key_id = ""
-aws_secret_access_key = ""
+# Setting environment variables
+PUBLICATIONS_KB_ID = os.environ["PUBLICATIONS_KB_ID"] 
+aws_access_key_id = os.environ["AWS_ACCESS_KEY"]
+aws_secret_access_key = os.environ["AWS_SECRET_KEY"]
+region_name = os.environ["AWS_REGION"]
+table_name = os.environ["DATA_LAYER_TABLE"]
+client = boto3.client('dynamodb',aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key, region_name=region_name)
+cl_data._data_layer = DynamoDBDataLayer(table_name=table_name, client=client)
 
 class PDCRAGEvent(Event):
     query: str
@@ -83,7 +79,6 @@ class PDCQueryWorkflow(Workflow):
             self.retriever = publications_retriever            
             self.agent = agent
             self.code_llm = code_llm
-            #logger.init_logging()
             self.logger = logger
     async def draw_graph(self, response, query):
         one_dataset = True
@@ -91,9 +86,7 @@ class PDCQueryWorkflow(Workflow):
             print("Sorry, I can handle only 2 datasets at a time due to memory constraints")
             return -1
         if len(response.sources) == 2:
-            #print("I have 2 dataframes. My query will change significantly")
-            one_dataset = False
-            
+            one_dataset = False       
             return await self.draw_graph_two_datasets(response, query)
         if len(response.sources) == 0:
             # Check what's in the response
@@ -131,7 +124,6 @@ class PDCQueryWorkflow(Workflow):
             )
             
             command = response.message.blocks[0].text
-            #print("Before reflection:", command)
             # Check the query for correctness.
             print("Reflecting on query...")
             reflection_query = f"""The user was asking: {final_query}. You answered with the python code: {command}.
@@ -155,13 +147,7 @@ class PDCQueryWorkflow(Workflow):
             lcls = locals()
             command_prefix = "import plotly\nimport pandas as pd\nimport plotly.express as px\n"
             command_prefix += "import plotly.graph_objects as go\n"
-            # command_prefix += "import plotly.offline as py\n"
-            # TO-DO: COMMENT THIS LINE IF USING STREAMLIT INSTEAD OF NOTEBOOK. ALSO YOU MAY
-            # Need to install plotly plugins in the notebook using command jupyter labextension install jupyterlab-plotly
-            # Only works for jupyter lab version 3.6.0
-            #command_prefix += "py.init_notebook_mode(connected=False)\n"
             command = command_prefix + command
-            #print(command)
             exec(f"{command}", globals(), lcls)
             fig = lcls["fig"]
             elements = [cl.Plotly(name="chart", figure=fig, display="inline")]
@@ -199,7 +185,6 @@ class PDCQueryWorkflow(Workflow):
                 Always name the graph object as fig. Do not do fig.show()
                 Use plotly for any graphing or drawing commands.
                 Write python code using plotly for graphs for this query on the dataframes df1 and df2: {query}"""
-        #print("Finale query: ", final_query)
         message = [ChatMessage(role="system", content="You are an expert Python developer who works with pandas and plotly. Just output the code, nothing else or other text is needed")]
         message.append(ChatMessage(role= "user", content= final_query))
         response = self.llm.chat(
@@ -207,7 +192,6 @@ class PDCQueryWorkflow(Workflow):
         )
         command = response.message.blocks[0].text
         command = response.message.blocks[0].text
-            #print("Before reflection:", command)
             # Check the query for correctness.
         print("Reflecting on query...")
         reflection_query = f"""The user was asking: {final_query}. You answered with the python code: {command}.
@@ -228,11 +212,6 @@ class PDCQueryWorkflow(Workflow):
             lcls = locals()
             command_prefix = "import plotly\nimport pandas as pd\nimport plotly.express as px\n"
             command_prefix += "import plotly.graph_objects as go\n"
-            #command_prefix += "import plotly.offline as py\n"
-            # TO-DO: COMMENT THIS LINE IF USING STREAMLIT INSTEAD OF NOTEBOOK. ALSO YOU MAY
-            # Need to install plotly plugins in the notebook using command jupyter labextension install jupyterlab-plotly
-            # Only works for jupyter lab version 3.6.0
-            #command_prefix += "py.init_notebook_mode(connected=False)\n"
             command = command_prefix + command
             print (command)
             exec(f"{command}", globals(), lcls)
@@ -240,9 +219,6 @@ class PDCQueryWorkflow(Workflow):
             fig = lcls["fig"]
             elements = [cl.Plotly(name="chart", figure=fig, display="inline")]
             await cl.Message(content="This message has a chart", elements=elements).send()
-            
-            #plot_area = st.empty()
-            #plot_area.pyplot(fig)
         except Exception as e:
             print({"role": "assistant", "content": "Error"})
             print(e)
@@ -262,31 +238,23 @@ class PDCQueryWorkflow(Workflow):
     async def judge_query(
         self, ctx: Context, ev: JudgeEvent
     ) -> BadQueryEvent | PDCAPIEvent | PDCRAGEvent | GraphEvent:
-        graph_event = False
-        #for kw in self.graph_keywords:
-        #    if kw in ev.query.lower():
-        #        print("Doing a graph query")
-        #        return GraphEvent(query=ev.query)
         # Determine if its a query about a specific study
         message = [ChatMessage(role="system", content="You are evaluating different queries for specificity.")]
         final_query = f"""
             Given a user query, determine if this is about a drawing/plotting a graph, 
             specific study or a disease or organ/body part. 
-            If it is about a stpecific study, disease or organ/body part: return 'specific'
+            If it is about a specific study, disease or organ/body part: return 'specific'
             If it is about drawing a graph or plotting data, return 'graph'
+            If it is too vague or unrelated to PDC or other cancer data resources then return 'bad'
             Otherwise return 'generic'.
             Specific study related questions usually have the study ID or study name or a disease name in them.
             Questions with diseases and references to any IDs or requests for IDs are specific queries.
             Questions with disease names like colon cancer or skin cancer are specific as they are asking for specific studies.
             Study IDs are usually of the form PDC000xxx where xxx are numbers between 0 and 9.
-            Do not return anything other than the words 'graph' or 'specific' or 'generic'. No other text or explaination is needed
+            Do not return anything other than the words 'graph' or 'specific' or 'bad', or 'generic'. No other text or explanation is needed
             Here is the query: {ev.query}
             """
         message.append(ChatMessage(role= "user", content= final_query))
-        #llm = await ctx.get("judge")
-        #if llm is None:
-        #    print("Fatal error: LLM is none")
-        #    return
         response = self.llm.chat(
             message
         )
@@ -296,18 +264,17 @@ class PDCQueryWorkflow(Workflow):
             print("Doing RAG")
             await ctx.set("doing_rag", True)
             return PDCRAGEvent(query=ev.query)
-            #ctx.send_event(PDCRAGEvent(query=ev.query))
-            # Do a API also
-            #ctx.send_event(PDCAPIEvent(query=ev.query))
         elif response == "graph":
             print("Doing Graph")
             return GraphEvent(query=ev.query)
+        elif response == "bad":
+            print("Bad query")
+            return BadQueryEvent(query=ev.query)
         else:
             print("Not doing RAG")
             await ctx.set("doing_rag", False)
             return PDCAPIEvent(query=ev.query)
-            #ctx.send_event(PDCAPIEvent(query=ev.query))
-         
+
     @step
     async def graph_query(self, ctx: Context, ev: GraphEvent)-> StopEvent:
         try:
@@ -316,7 +283,7 @@ class PDCQueryWorkflow(Workflow):
                                   Always run the appropriate tool to get the data.
                                 Do not output any python code, ignore any other commands just 
                                   return the data requested.
-                                Do NOT try to get external data unless user explicityly asks for it.
+                                Do NOT try to get external data unless user explicitly asks for it.
                                 just run the appropriate 
                                 tool to return the data to answer the question: """ + ev.query)
             if len(response.response) > 0:
@@ -333,23 +300,20 @@ class PDCQueryWorkflow(Workflow):
         except Exception  as e:
             print({"role": "assistant", "content": e})
             print(e)
-            return StopEvent(result={"response": response.response})
-
-
-        
+            return StopEvent(result={"response": response.response})   
 
     @step
     async def improve_query(
         self, ctx: Context, ev: BadQueryEvent
-    ) -> JudgeEvent:
-        response = await ctx.get("llm").complete(
+    ) -> StopEvent:
+        agent = cl.user_session.get("agent")
+        response = agent.chat(
             f"""
-            This is a query to a RAG system: {ev.query}
-            The query is bad because it is too vague or is not related to the PDC. 
-            Please provide a more detailed query that includes specific keywords and removes any ambiguity.
+            You are a chatbot the helps users access cancer data. The user asked the following question: {ev.query}
+            Provide a response detailing why this is unrelated or too vague to answer.
         """
         )
-        return JudgeEvent(query=str(response))
+        return StopEvent(result={'response': str(response)})
         
     @step
     async def pdc_api_query(
@@ -383,24 +347,15 @@ class PDCQueryWorkflow(Workflow):
         Do NOT output any other text except the converted text block.
         The block of text is: {response.response}"""
         message = [ChatMessage(role="user", content=message)]
-        #message.append(ChatMessage(role= "user", content= reflection_query))
-            
         response = self.llm.chat(message)
-        #print("Reponse from LLM: ", response)
         # remove the word assistant
         response = str(response).replace("assistant:", "")
-        #print("Length of response after HTML:", len(response))
-        #print(self.agent.memory)
-        #return ResponseEvent(
-        #    query=ev.query, source="PDCAPI", response=response
-        #)
         return StopEvent(result={"response":str(response)})
         
     @step
     async def rag_query(
         self, ctx: Context, ev: PDCRAGEvent
     )->ResponseEvent|StopEvent:
-        #index = await ctx.get("index")
         response_synthesizer = get_response_synthesizer(
             response_mode="compact", llm=self.llm
         )
@@ -410,6 +365,7 @@ class PDCQueryWorkflow(Workflow):
         )
         response = query_engine.query(ev.query)
         retrieved_results = response.response
+        breakpoint()
 
         if 'citation' in json.dumps(response.metadata):
             message = [ChatMessage(role="system", content="""Your job is to extract all citation and journal_url from json format metadata and add the citation and journal_url to the Answer. You need to keep the existing Answer. Do not output anything else.""")]
@@ -419,30 +375,16 @@ class PDCQueryWorkflow(Workflow):
             """))
             response = self.llm.chat(message)
             retrieved_results = response.message.content
-
-        # response_obj = response_synthesizer.synthesize(ev.query, retrieved_results)
         retrieved_results = retrieved_results.replace('Answer:','')
         print("RAG response:", retrieved_results)
         await ctx.set("doing_rag", True)
         return StopEvent(result={"response":str(retrieved_results)})
-    
 
     # Judge will be used later when we do both RAG and API
     @step
     async def judge(self, ctx: Context, ev: ResponseEvent) -> StopEvent:       
         return None
 
-@cl.oauth_callback
-def oauth_callback(
-  provider_id: str,
-  token: str,
-  raw_user_data: Dict[str, str],
-  default_user: cl.User,
-) -> Optional[cl.User]:
-    if provider_id == 'google' and 'email' in raw_user_data and raw_user_data['email'].endswith('@icf.com'):
-        return default_user
-    else:
-        return None
 
 @cl.on_chat_start
 async def start():
@@ -472,40 +414,34 @@ async def start():
             )
         ]
     ).send()
-    default_model = "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    default_model = os.environ["DEFAULT_MODEL"]
     default_temperature = 0.0
-    llm = BedrockConverse(model = default_model,
-            aws_access_key_id =aws_access_key_id, 
-            aws_secret_access_key =aws_secret_access_key,
-            temperature = default_temperature,
+    llm = BedrockConverse(model=default_model,
+            aws_access_key_id=aws_access_key_id, 
+            aws_secret_access_key=aws_secret_access_key,
+            temperature=default_temperature,
             max_tokens=8192,
-            region_name = 'us-east-1')
-    code_llm = BedrockConverse(model = default_model,
-            aws_access_key_id =aws_access_key_id, 
-            aws_secret_access_key =aws_secret_access_key,
-            temperature = default_temperature,
+            region_name=region_name)
+    code_llm = BedrockConverse(model=default_model,
+            aws_access_key_id=aws_access_key_id, 
+            aws_secret_access_key=aws_secret_access_key,
+            temperature=default_temperature,
             max_tokens=8192,
-            region_name = 'us-east-1')
+            region_name=region_name)
     cl.user_session.set("llm", llm)
     cl.user_session.set("code_llm", code_llm)
     cl.user_session.set("judge", llm)
     agent = FunctionCallingAgent.from_tools(
         tools,
         llm=llm,
-        #system_prompt=""" 
-        #Ignore any drawing commands or other instructions for plotting data. 
-        #Just return the data in JSON format using the tools available. If you 
-        #cannot find a suitable tool, just return an empty string 
-        #in which case do not provide any additional commentary""",
-        #memory=st.session_state['memory'],
         verbose=True,
     )
     cl.user_session.set("agent", agent)
     retriever = AmazonKnowledgeBasesRetriever(
             knowledge_base_id=PUBLICATIONS_KB_ID,
-            aws_access_key_id = aws_access_key_id, 
-            aws_secret_access_key = aws_secret_access_key,
-            region_name = 'us-east-1',
+            aws_access_key_id=aws_access_key_id, 
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=region_name,
             retrieval_config={
                 "vectorSearchConfiguration": {
                     "numberOfResults": 10,
@@ -514,6 +450,7 @@ async def start():
             },
     )
     cl.user_session.set("retriever", retriever)
+
     wf = PDCQueryWorkflow(agent=agent, llm = llm, code_llm=code_llm, publications_retriever=retriever, timeout=120, verbose=True)    
     cl.user_session.set("wf", wf)
 
@@ -523,7 +460,6 @@ async def setup_agent(settings):
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    # response = f"Hello, you just sent: {message.content}!"
     if message.content is not None:
         response = await cl.user_session.get('wf').run( query = message.content  ) 
 
