@@ -10,9 +10,9 @@ Before using the app, need to obtain various authentications and set them in .en
 
 ## Installation
 
-Clone the repository
-`cd BDF-Chainlit-Chatbot`
-`pip install requirements.txt`
+1. Clone the repository
+2. `cd BDF-Chainlit-Chatbot`
+3. `pip install requirements.txt`
 
 If running the app in local environment we suggest to create a virtual environment and run the app from there:
 

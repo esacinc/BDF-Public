@@ -3,12 +3,6 @@ import chainlit as cl
 import os
 from typing import Dict, Optional
 
-# Configure logging to output to stdout
-logging.basicConfig(
-    level=logging.INFO,  # Log level
-    format="%(asctime)s - %(levelname)s - %(message)s"  # Log format
-)
-logger = logging.getLogger(__name__)
 
 ENABLE_PASSWORD_AUTH = os.getenv("ENABLE_PASSWORD_AUTH", "false").lower() == "true"
 ENABLE_OAUTH = os.getenv("ENABLE_OAUTH", "false").lower() == "true"

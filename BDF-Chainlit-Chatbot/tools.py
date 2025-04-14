@@ -1,7 +1,6 @@
 from typing import List
 import requests
 from pydantic.fields import Field
-from typing import List
 from pydantic import BaseModel
 from llama_index.core.tools import FunctionTool
 import PDC_tools

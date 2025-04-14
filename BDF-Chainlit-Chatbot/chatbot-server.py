@@ -365,7 +365,6 @@ class PDCQueryWorkflow(Workflow):
         )
         response = query_engine.query(ev.query)
         retrieved_results = response.response
-        breakpoint()
 
         if 'citation' in json.dumps(response.metadata):
             message = [ChatMessage(role="system", content="""Your job is to extract all citation and journal_url from json format metadata and add the citation and journal_url to the Answer. You need to keep the existing Answer. Do not output anything else.""")]

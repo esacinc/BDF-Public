@@ -3,14 +3,14 @@ from typing import List
 import json, requests
 from io import StringIO
 from typing import List
-import pandas as pd;
+import pandas as pd
+import os
 
 # This is a set of helper function for retrieving and processing data from PDC
 
-pdc_url = 'https://proteomic.datacommons.cancer.gov/graphql?query='
+pdc_url = os.environ["PDC_API"]
 
 # Helper function to cache all diseases and primary sites from PDC
-# TO DO: Use a proper metadata source for these values e.g. PDC Dictionary or caDSR
 def getAllDiseasesAndPrimarySites():
     all_studies = []
     all_studies_map = {}
@@ -60,7 +60,7 @@ def getAllDiseasesAndPrimarySites():
       response.raise_for_status()
         
 
-# This is a helper function
+# This is a helper function that returns all PDC studies by disease or primary site
 def getDiseaseInformation(mdata:object)->str:
     '''
     Given a disease or a primary site, returns all the matching studies including disease name, primary site and study id.
