@@ -5,6 +5,7 @@ from io import StringIO
 from typing import List
 import pandas as pd
 import os
+from tools import tools
 
 # This is a set of helper function for retrieving and processing data from PDC
 
@@ -439,7 +440,7 @@ def get_clinical_and_demographic_data(study_name=None, study_id=None):
 
 def get_external_genomic_data(study_id: str, gene_names: List):
     """ Get data from GDC based on study name"""
-    ensmbl_ids = gene_name_to_ensembl_mapping(gene_names)
+    ensmbl_ids = tools.gene_name_to_ensembl_mapping(gene_names)
     print("Ensembl IDs: ", ensmbl_ids)
     e_ids = []
     replace_dict = {}
