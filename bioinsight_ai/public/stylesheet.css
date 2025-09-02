@@ -1,0 +1,35 @@
+﻿/* Increase the size of spinner icon when loading the response */
+svg.lucide.lucide-loader {
+    height: 56px !important;
+    width: 56px !important;
+}
+
+button.inline-flex:nth-child(1) {
+    border-color: blue;
+    font-size: large;
+}
+
+/*button.inline-flex.items-center.justify-center.gap-2.whitespace-nowrap.rounded-md.text-sm.font-medium.ring-offset-background.transition-colors.focus-visible:outline-none.focus-visible:ring-2.focus-visible:ring-ring.focus-visible:ring-offset-2.disabled:pointer-events-none.disabled:opacity-50.[&_svg]:pointer-events-none.[&_svg]:size-4.[&_svg]:shrink-0.border.border-input.bg-background.hover:bg-accent.hover:text-accent-foreground.h-10.px-4.py-2 */
+
+/* AHB-285 nMake the ICF icon on the right side smaller and fit the screen */
+/* light theme */
+html.light div.relative.hidden.bg-muted.lg\:block {
+    background-color: white !important;
+}
+
+/* dark theme */
+html.dark div.relative.hidden.bg-muted.lg\:block {
+    background-color: #333333 !important;
+}
+
+/* setting png image size */
+img.absolute.inset-0.h-full.w-full {
+    height: auto !important;
+    width: auto !important;
+}
+
+/* AHB-286 increase the size of blinking dot when the chabot is thinking about a response */
+span.inline-block.h-3\.5.w-3\.5.bg-foreground.rounded-full.animate-pulse {
+    height: 42px !important; /* Double the height */
+    width: 42px !important; /* Double the width */
+}
