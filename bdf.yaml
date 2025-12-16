@@ -1,0 +1,69 @@
+version: v0.0.1
+
+tool:
+  name: Test
+  repo_url: https://github.com/esacinc/BDF-Public
+  tool_homepage: www.bioinsight-ai.com
+  documentation_url: www.bioinsight-ai.com
+  tool_type: AI Chatbot
+
+llm:
+  usesLlm: true
+  modelsSupported:
+    - claude-sonnet-4-5
+  modelsRequired:
+    - claude-sonnet-4-5
+  bringOwnKey: false
+
+input:
+  - name: Test input
+    dataCategory: omics-molecular
+    dataClass: unstructured-text
+    dataType: Chat questions
+    format:
+      - txt
+    dataStandard:
+      - unknown
+    proprietary: false
+    source:
+
+output:
+  - name: Test output
+    dataCategory: Chat response
+    dataClass: text and images
+    dataType: unknown
+    format:
+      - json
+    dataStandard:
+      - unknown
+    proprietary: false
+    source:
+
+collaborations: []
+
+domains:
+  - sample domain
+
+credit:
+  - name: Team
+    role: Developer
+    org: ICF
+    url: www.bioinsight-ai.com
+
+maturity:
+  beginning_maturity: 1
+  current_maturity: 7
+
+license:
+  license_type: Apache License 2.0
+  link: https://github.com/esacinc/BDF-Public/blob/main/LICENSE
+  
+target_users:
+  primary_user:
+    user_type: researcher
+    technical_literacy_level:
+      - intermediate
+    biomedical_literacy_level:
+      - high
+
+media: []
