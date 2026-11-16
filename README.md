@@ -174,6 +174,19 @@ bioinsight_ai/
 
 ---
 
+### 🎥 Demo Videos
+Short demo videos showcasing BioInsight’s discovery, exploration, and visualization capabilities are available on our YouTube channel:
+- Natural language discovery across proteomics, genomics, and imaging data
+- Exploring cohorts, demographics, and study metadata
+- Interactive molecular and imaging visualizations
+- Cross-repository exploration and follow-up queries
+
+**👉 Watch the demos:** [YouTube channel](https://www.youtube.com/@bioinsightai)
+
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+## 🤝 Feedback & Contact
+We’d love to hear from you! If you have feedback, questions, or suggestions, feel free to reach out to us at <bioinsight-ai@icf.com>. Your input helps us improve BioInsight.
+
