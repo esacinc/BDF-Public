@@ -1,0 +1,24 @@
+{% extends "email/base.html" %}
+{% block content %}
+<h2 style="color:#111827;">Welcome to BioInsight AI 🎉</h2>
+
+<p>Hello {{ email }},</p>
+
+<p>Your BioInsight AI account has been <strong>approved</strong> by an administrator.</p>
+
+<p>
+  ✅ You may now log in using your Google account associated with this email:
+  <strong>{{ email }}</strong>
+</p>
+
+<p>
+  Click below to log in:
+</p>
+
+<p>
+  <a href="{{ login_url }}" 
+     style="display:inline-block; padding:10px 20px; color:#ffffff !important; background:#2563eb; border-radius:6px; text-decoration:none; font-weight:bold;">
+     Login with Google
+  </a>
+</p>
+{% endblock %}

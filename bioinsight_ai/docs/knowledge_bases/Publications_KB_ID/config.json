@@ -1,0 +1,158 @@
+{
+  "knowledgeBase": {
+    "knowledgeBaseId": "<PUBLICATIONS_KB_ID>",
+    "name": "<KNOWLEDGE_BASE_NAME>",
+    "knowledgeBaseArn": "arn:aws:bedrock:us-east-1:<ACCOUNT_ID>:knowledge-base/<PUBLICATIONS_KB_ID>",
+    "description": "Knowledge base for ARPA-H project",
+    "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_<SUFFIX>",
+    "knowledgeBaseConfiguration": {
+      "type": "VECTOR",
+      "vectorKnowledgeBaseConfiguration": {
+        "embeddingModelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0",
+        "embeddingModelConfiguration": {
+          "bedrockEmbeddingModelConfiguration": {
+            "dimensions": 1024
+          }
+        }
+      }
+    },
+    "storageConfiguration": {
+      "type": "OPENSEARCH_SERVERLESS",
+      "opensearchServerlessConfiguration": {
+        "collectionArn": "arn:aws:aoss:us-east-1:<ACCOUNT_ID>:collection/<COLLECTION_ID>",
+        "vectorIndexName": "bedrock-knowledge-base-default-index",
+        "fieldMapping": {
+          "vectorField": "bedrock-knowledge-base-default-vector",
+          "textField": "AMAZON_BEDROCK_TEXT",
+          "metadataField": "AMAZON_BEDROCK_METADATA"
+        }
+      }
+    },
+    "status": "ACTIVE",
+    "createdAt": "2025-01-03T20:52:42.417569+00:00",
+    "updatedAt": "2025-01-03T20:52:42.417569+00:00"
+  },
+  "dataSources": [
+    {
+      "knowledgeBaseId": "<PUBLICATIONS_KB_ID>",
+      "dataSourceId": "<DATA_SOURCE_ID_1>",
+      "name": "Data-Commons-Website-Docs",
+      "status": "AVAILABLE",
+      "dataSourceConfiguration": {
+        "type": "WEB",
+        "webConfiguration": {
+          "sourceConfiguration": {
+            "urlConfiguration": {
+              "seedUrls": [
+                {
+                  "url": "https://pdc.cancer.gov/pdc-docs/"
+                },
+                {
+                  "url": "https://learn.canceridc.dev/"
+                },
+                {
+                  "url": "https://docs.gdc.cancer.gov/"
+                }
+              ]
+            }
+          },
+          "crawlerConfiguration": {
+            "crawlerLimits": {
+              "rateLimit": 300,
+              "maxPages": 25000
+            },
+            "userAgentHeader": "bedrockbot_<UUID>"
+          }
+        }
+      },
+      "vectorIngestionConfiguration": {
+        "chunkingConfiguration": {
+          "chunkingStrategy": "HIERARCHICAL",
+          "hierarchicalChunkingConfiguration": {
+            "levelConfigurations": [
+              {
+                "maxTokens": 1500
+              },
+              {
+                "maxTokens": 300
+              }
+            ],
+            "overlapTokens": 60
+          }
+        },
+        "parsingConfiguration": {
+          "parsingStrategy": "BEDROCK_DATA_AUTOMATION"
+        }
+      },
+      "dataDeletionPolicy": "DELETE",
+      "createdAt": "2026-02-16T14:20:54.211213+00:00",
+      "updatedAt": "2026-02-17T15:41:19.008212+00:00"
+    },
+    {
+      "knowledgeBaseId": "<PUBLICATIONS_KB_ID>",
+      "dataSourceId": "<DATA_SOURCE_ID_2>",
+      "name": "<DATA_SOURCE_NAME>",
+      "status": "AVAILABLE",
+      "dataSourceConfiguration": {
+        "type": "S3",
+        "s3Configuration": {
+          "bucketArn": "arn:aws:s3:::<FAQ_BUCKET_NAME>"
+        }
+      },
+      "vectorIngestionConfiguration": {},
+      "dataDeletionPolicy": "DELETE",
+      "createdAt": "2025-01-09T21:24:45.559362+00:00",
+      "updatedAt": "2025-01-09T21:24:45.559362+00:00"
+    },
+    {
+      "knowledgeBaseId": "<PUBLICATIONS_KB_ID>",
+      "dataSourceId": "<DATA_SOURCE_ID_3>",
+      "name": "publications",
+      "status": "AVAILABLE",
+      "dataSourceConfiguration": {
+        "type": "S3",
+        "s3Configuration": {
+          "bucketArn": "arn:aws:s3:::<PUBLICATIONS_BUCKET_NAME>",
+          "inclusionPrefixes": [
+            "publications/"
+          ]
+        }
+      },
+      "vectorIngestionConfiguration": {},
+      "dataDeletionPolicy": "DELETE",
+      "createdAt": "2025-01-03T20:52:43.063012+00:00",
+      "updatedAt": "2026-05-27T17:08:04.253099+00:00"
+    },
+    {
+      "knowledgeBaseId": "<PUBLICATIONS_KB_ID>",
+      "dataSourceId": "<DATA_SOURCE_ID_4>",
+      "name": "<DATA_SOURCE_NAME>",
+      "status": "AVAILABLE",
+      "dataSourceConfiguration": {
+        "type": "WEB",
+        "webConfiguration": {
+          "sourceConfiguration": {
+            "urlConfiguration": {
+              "seedUrls": [
+                {
+                  "url": "https://proteomic.datacommons.cancer.gov/pdc/faq"
+                }
+              ]
+            }
+          },
+          "crawlerConfiguration": {
+            "crawlerLimits": {
+              "rateLimit": 10,
+              "maxPages": 25000
+            },
+            "userAgentHeader": "bedrockbot_<UUID>"
+          }
+        }
+      },
+      "vectorIngestionConfiguration": {},
+      "dataDeletionPolicy": "DELETE",
+      "createdAt": "2025-01-09T16:23:43.695932+00:00",
+      "updatedAt": "2025-01-09T16:23:43.695932+00:00"
+    }
+  ]
+}

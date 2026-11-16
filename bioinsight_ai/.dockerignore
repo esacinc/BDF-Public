@@ -1,10 +1,81 @@
+# --- Git ---
 .git
+.gitignore
+.gitattributes
+.gitmodules
+
+# --- Python build artifacts ---
 __pycache__/
-*.pyc
-*.pyo
-*.log
-*.zip
-.env
-.env.runtime
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+*.spec
 build/
+dist/
+.eggs/
+
+# --- Virtual environments & local envs ---
+.venv/
+venv/
+env/
+*.venv/
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.runtime
+*.egg
+
+# --- Frontend build outputs ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.vercel/
+frontend/build/
+frontend/coverage/
+frontend/.cache/
+
+# --- Python caches & logs ---
+__tests__/
 tests/
+.cache/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.pid
+
+# --- Binary & dataset files ---
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.h5
+*.pt
+*.ckpt
+*.onnx
+*.pkl
+*.bin
+*.npy
+*.npz
+*.csv
+*.tsv
+*.parquet
+*.feather
+models/
+artifacts/
+.cache-bdikit/
+data/
+datasets/
+
+# --- Misc/IDE files ---
+.vscode/
+.idea/
+*.iml
+*.DS_Store
+Thumbs.db
+__MACOSX/

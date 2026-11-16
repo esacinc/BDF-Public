@@ -1,0 +1,106 @@
+{
+  "knowledgeBase": {
+    "knowledgeBaseId": "<MWB_KB_ID>",
+    "name": "metabolomics-workbench",
+    "knowledgeBaseArn": "arn:aws:bedrock:us-east-1:<ACCOUNT_ID>:knowledge-base/<MWB_KB_ID>",
+    "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_<SUFFIX>",
+    "knowledgeBaseConfiguration": {
+      "type": "VECTOR",
+      "vectorKnowledgeBaseConfiguration": {
+        "embeddingModelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0",
+        "embeddingModelConfiguration": {
+          "bedrockEmbeddingModelConfiguration": {
+            "dimensions": 1024
+          }
+        }
+      }
+    },
+    "storageConfiguration": {
+      "type": "OPENSEARCH_SERVERLESS",
+      "opensearchServerlessConfiguration": {
+        "collectionArn": "arn:aws:aoss:us-east-1:<ACCOUNT_ID>:collection/<COLLECTION_ID>",
+        "vectorIndexName": "bedrock-knowledge-base-default-index",
+        "fieldMapping": {
+          "vectorField": "bedrock-knowledge-base-default-vector",
+          "textField": "AMAZON_BEDROCK_TEXT",
+          "metadataField": "AMAZON_BEDROCK_METADATA"
+        }
+      }
+    },
+    "status": "ACTIVE",
+    "createdAt": "2025-03-25T17:45:27.712590+00:00",
+    "updatedAt": "2025-03-25T17:45:27.712590+00:00"
+  },
+  "dataSources": [
+    {
+      "knowledgeBaseId": "<MWB_KB_ID>",
+      "dataSourceId": "<DATA_SOURCE_ID_1>",
+      "name": "website",
+      "status": "AVAILABLE",
+      "dataSourceConfiguration": {
+        "type": "WEB",
+        "webConfiguration": {
+          "sourceConfiguration": {
+            "urlConfiguration": {
+              "seedUrls": [
+                {
+                  "url": "https://www.metabolomicsworkbench.org/data"
+                },
+                {
+                  "url": "https://www.metabolomicsworkbench.org/databases"
+                },
+                {
+                  "url": "https://www.metabolomicsworkbench.org/protocols"
+                },
+                {
+                  "url": "https://www.metabolomicsworkbench.org/tools"
+                },
+                {
+                  "url": "https://www.metabolomicsworkbench.org/about"
+                },
+                {
+                  "url": "https://www.metabolomicsworkbench.org/tools/MWRestAPIv1.1.pdf"
+                }
+              ]
+            }
+          },
+          "crawlerConfiguration": {
+            "crawlerLimits": {
+              "rateLimit": 300
+            },
+            "inclusionFilters": [
+              "https://www.metabolomicsworkbench.org/data(\\/)?(index|tutorials|faq|DRCCDataDeposit)?(\\.php)?$",
+              "https://www.metabolomicsworkbench.org/databases(\\/)?(index|refmet\\/index|refmet\\/refmet_help)?(\\.php)?$",
+              "https://www.metabolomicsworkbench.org/protocols(\\/)?(index)?(\\.php)?$",
+              "https://www.metabolomicsworkbench.org/tools(\\/)?(index|mw_rest|)?(\\.php)?$"
+            ],
+            "exclusionFilters": [
+              "https://www.metabolomicsworkbench.org/search/.*",
+              "https://www.metabolomicsworkbench.org(\\/)?(login|sendusername|forgotpassword|register)?(\\.php)?$"
+            ],
+            "userAgentHeader": "bedrockbot_<UUID>"
+          }
+        }
+      },
+      "vectorIngestionConfiguration": {
+        "chunkingConfiguration": {
+          "chunkingStrategy": "HIERARCHICAL",
+          "hierarchicalChunkingConfiguration": {
+            "levelConfigurations": [
+              {
+                "maxTokens": 1500
+              },
+              {
+                "maxTokens": 500
+              }
+            ],
+            "overlapTokens": 60
+          }
+        }
+      },
+      "dataDeletionPolicy": "DELETE",
+      "createdAt": "2025-03-27T13:06:24.695581+00:00",
+      "updatedAt": "2025-03-27T14:43:17.429334+00:00"
+    }
+  ]
+}

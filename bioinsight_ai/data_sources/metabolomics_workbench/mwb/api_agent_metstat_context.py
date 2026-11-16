@@ -1,7 +1,10 @@
-from llama_index.core.agent.workflow import FunctionAgent
 from typing import Literal, Annotated
 import aiohttp
 from workflow_config.default_settings import Settings
+from agents.bioinsight_agent import BioInsightAgent
+from log_helper.logger import get_logger
+
+logger = get_logger()
 
 #
 # MWB sub-agent specializing in one of seven context areas of the MWB REST API
@@ -10,7 +13,7 @@ from workflow_config.default_settings import Settings
 context = "metstat"
 
 # Annotated tool specifically for formulating a metstat endpoint
-async def call_metstat_endpoint(
+async def metstat_api(
     ANALYSIS_TYPE: Annotated[
         Literal[
             '', 
@@ -684,10 +687,10 @@ async def call_metstat_endpoint(
                     data = await response.text()
                 return data
             else:
-                print(f"Error: {response.status}")
-                return None
+                logger.error(f"[MWB REST API] Call failed with response: {response.status}:{response.reason}")
+                return response.reason
 
-metstat_agent = FunctionAgent(
+metstat_agent = BioInsightAgent(
     name=f"{context.title()} Agent",
     description=(
         "Take a user plain language question, translate it appropriately into Metabolomics Workbench REST API endpoint keywords, call the API to get data, "
@@ -697,16 +700,37 @@ metstat_agent = FunctionAgent(
         "information and provides information about any or all of the following criteria: analysis type, polarity, chromatography, species, sample source, "
         "disease, KEGG ID, and or RefMet name."
     ),
-    system_prompt=(
-        f"You are an expert on the Metabolomics Workbench data source, specifically the {context} context of the REST API. Do not use outside knowledge.\n"
-        ""
-        "Step 1: Determine if the user is asking a follow up question about about data you've already retrieved. "
-        "If your memory provides enough detail then stop immediately and respond directly to the user. Do NOT proceed to the remaining steps.\n"
-        "Step 2: If you cannot answer the question using memory then translate the plain language user query into appropriate function arguments " 
-        "to fetch data using the 'call_metstat_endpoint' tool. Use the retrieved data to and answer the query.\n"
-        "If clarification is needed from the user be then ask for clarification. If you have made ANY corrections to the user's query " 
-        "mention that in your response.\n"
-    ),
-    tools=[call_metstat_endpoint],
+    system_prompt=f"""
+<role>
+You are a specialized agent for the Metabolomics Workbench REST API, focused on the {context} context.
+Your primary function is to translate user queries into API calls and present results clearly then work with other agents as needed to provide a complete answer.
+</role>
+
+<instructions>
+<workflow>
+1. Analyze the user's query to identify required API endpoints
+2. Use the 'metstat_api' tool to translate the user's query into API parameters and execute the call in a single operation
+3. Analyze the API response data to determine if additional endpoint calls are needed
+4. Repeat step 2 as necessary until you have sufficient information to answer the query
+5. Format your response with proper markdown
+6. Consider hand-off to other agents if the query extends beyond your context to provide a comprehensive answer
+</workflow>
+
+<response_guidelines>
+- Prioritize API data over general knowledge
+- Cite specific data points from responses
+- Acknowledge data limitations when present
+</response_guidelines>
+
+<error_handling>
+If metstat_api returns an error:
+1. Examine which parameter validation failed
+2. Adjust parameters based on the validation criteria provided
+3. Retry with corrected parameters
+4. If multiple attempts fail, explain to the user which constraints prevent the query
+</error_handling>
+</instructions>
+""",
+    tools=[metstat_api],
     can_hand_off_to=["Compound Agent", "Gene Agent", "Moverz Agent", "Protein Agent", "Refmet Agent", "Study Agent", "Metabolomics RAG Agent"]
 )

@@ -1,10 +1,9 @@
 import data_sources.metabolomics_workbench.mwb.api_validation_input_output as io_validation
 import data_sources.metabolomics_workbench.mwb.api_validation_permutation as validation
-from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.core.workflow import Event
+from agents.bioinsight_agent import BioInsightAgent
 from typing import Literal, Annotated
 from workflow_config.default_settings import Settings
-from .tools import call_rest_endpoint
+from .tools import call_rest_endpoint, generate_molecule_view
 
 #
 # MWB sub-agent specializing in one of seven context areas of the MWB REST API
@@ -13,7 +12,7 @@ from .tools import call_rest_endpoint
 context = "compound"
 
 # Annotated tool specifically for formulating a compound endpoint
-def endpoint_kwargs(
+async def compound_api(
     input_item: Annotated[
         Literal["regno", "formula", "inchi_key", "lm_id", "pubchem_cid", "hmdb_id", "kegg_id", "chebi_id", "metacyc_id", "abbrev"], 
         """One of regno | formula | inchi_key | lm_id | pubchem_cid | hmdb_id | kegg_id | chebi_id | metacyc_id | abbrev. 
@@ -53,7 +52,7 @@ def endpoint_kwargs(
         "Return format of data. Can be one of the following: txt | json. If unsure use json."
     ] = "json"
 ) -> str: 
-    f"""Function to validate keywords needed to construct a valid REST API URL path to retrieve {context} context data from the Metabolomics Workbench website."""
+    f"""Function to construct and call a valid REST API URL path to retrieve {context} context data from the Metabolomics Workbench website."""
     
     if "," in output_item:
         multi_item_set = ["regno", "formula", "exactmass", "inchi_key", "name", "sys_name", "lm_id", "pubchem_cid", "hmdb_id", "kegg_id", "chebi_id", "metacyc_id", "smiles"]
@@ -64,50 +63,15 @@ def endpoint_kwargs(
             raise ValueError(
                     f"Invalid 'output_item' format. {', '.join(invalid_items)} not found. "
                     f"Only valid values are: {', '.join(multi_item_set)} separated by a comma without any space."
-            )        
-    return f"{{'context': 'compound', 'input_item': {input_item}, 'input_value': {input_value}, 'output_item': {output_item}, 'output_format': {output_format}}}"
+            )
+    
+    kwargs = {'context': context, 'input_item': input_item, 'input_value': input_value, 'output_item': output_item, 'output_format': output_format}
+    
+    data = await call_rest_endpoint(**kwargs)
+    
+    return data
 
-class MolView(Event):
-    def __init__(self, cid: str, regno: str, title: str, mode: str = "balls", bg: str = "black", **kwargs):
-        super().__init__(**kwargs)
-        self.cid = cid
-        self.regno = regno
-        self.title = title
-        self.mode = mode
-        self.bg = bg
-    def __repr__(self):
-        return f"MolView(cid='{self.cid}', regno='{self.regno}, 'title='{self.title}', mode='{self.mode}', bg='{self.bg}')"
-
-def generate_molecule_view(
-    cid: Annotated[str, "PubChem Compound Identifier"],
-    regno: Annotated[str, "Metabolomics Workbench Registry Number (used as fallback if CID fails)"],
-    title: Annotated[str, "Title of 3-D viewer"],
-    mode: Annotated[
-        Literal[
-            'stick',     # Bonds as cylinders (default)
-            'line',      # Lightweight lines
-            'wireframe', # Thinner, faster lines
-            'sphere',    # Atoms as spheres (space-filling)
-            'vdw',       # Alias for sphere
-            'cross',     # Atoms as crosses
-            'balls',     # Custom: stick + sphere (ball-and-stick)
-            'cartoon'    # Only for biomolecules (e.g., PDB)
-        ],
-        "Molecule representation style. Defaults to 'balls'. 'balls' is a custom ball-and-stick combo. 'cartoon' only works for biomolecules."
-    ] = "balls",
-    bg: Annotated[
-        Literal['0x000000', '0xC0C0C0', '0xFFFFFF'],
-        "Background color in hex. Defaults to '0x000000' (black)."
-    ] = "0x000000"
-) -> MolView:
-    """Render an interactive 3-D view of a molecule from a PubChem Compound ID (CID) or Metabolomics Workbench registry number (regno). 
-    Useful for summarizing and providing general information about a compound.
-    """ 
-    mol_view = MolView(cid=cid, regno=regno, title=title, mode=mode, bg=bg)
-    return(mol_view)
-
-
-compound_agent = FunctionAgent(
+compound_agent = BioInsightAgent(
     name=f"{context.title()} Agent",
     description=("Take a user plain language question, translate it appropriately into Metabolomics Workbench REST API endpoint keywords, call the API to get data, "
                  f"and use the data to respond. Specializes in the {context} context area of the API. The 'compound' context provides services for the Metabolomics "
@@ -116,25 +80,53 @@ compound_agent = FunctionAgent(
                  "provides access to many structural features including molfile, SMILES, InChIKey, exact mass, formula common and systematic names, chemical classification "
                  "and cross-references to other databases."
                  ),
-    system_prompt=(
-        f"You are an expert on the Metabolomics Workbench data source, specifically the {context} context of the REST API. Do not use outside knowledge.\n"
-        ""
-        "Step 1: Determine if the user is asking a follow up question about about data you've already retrieved. "
-        "If your memory provides enough detail then stop immediately and respond directly to the user. Do NOT proceed to the remaining steps.\n"
-        "Step 2: If you cannot answer the question using memory then use the following context: \n"
-        f"{io_validation.compound}"
-        "and the 'endpoint_kwargs' tool to translate the plain language user query into appropriate endpoint keywords.\n"
-        "Step 3: You must verify the output of 'endpoint_kwargs' against the following criteria and confirm for correctness:\n"
-        f"{validation.compound}"
-        ""
-        "Step 4: If the criteria in Step 3 is met then use the tool 'call_rest_endpoint' to fetch data and answer the query. If requesting an image then return the URL. "
-        "If clarification is needed from the user be then ask for clarification. If you have made ANY corrections to the user's query " 
-        "mention that in your response. Any SMILES notation should be returned in markdown format (e.g. `[OH2]`). Any png URLs should be displayed in markdown (e.g. [<Image description>](<Image URL>). "
-        "Step 5: If the criteria in Step 3 is violated then restart at Step 1, but reconsider the arguments passed to 'endpoint_kwargs' or "
-        "if clarification is needed from the user be then ask for clarification but be direct.\n"
-        "If using `generate_molecule_view()` tool the 3D molecule view will be generated below your response. Therefore, any references to the 3D model should start "
-        "with a phrase like, 'Below you will find <3D molecule view description>`"
-    ),
-    tools=[endpoint_kwargs, call_rest_endpoint, generate_molecule_view],
-    can_hand_off_to=["Compound Agent", "Gene Agent", "Moverz Agent", "Protein Agent", "Refmet Agent", "Study Agent", "Metabolomics RAG Agent"]
+    system_prompt=f"""
+<role>
+You are a specialized agent for the Metabolomics Workbench REST API, focused on the {context} context.
+Your primary function is to translate user queries into API calls and present results clearly then work with other agents as needed to provide a complete answer.
+</role>
+
+<background_information>
+API Keyword Input/Output Validation: 
+{io_validation.compound}
+
+Parameter Validation: 
+{validation.compound}
+</background_information>
+
+<instructions>
+<workflow>
+1. Analyze the user's query to identify required API endpoints
+2. Use the 'compound_api' tool to translate the user's query into API parameters and execute the call in a single operation
+3. Analyze the API response data to determine if additional endpoint calls are needed
+4. Repeat step 2 as necessary until you have sufficient information to answer the query
+5. Format your response with proper markdown
+6. For molecule-specific queries with CID or regno, generate 3D views using `generate_molecule_view()`
+7. Consider hand-off to other agents if the query extends beyond your context to provide a comprehensive answer
+</workflow>
+
+<response_guidelines>
+- Prioritize API data over general knowledge
+- Cite specific data points from responses
+- Acknowledge data limitations when present
+</response_guidelines>
+
+<error_handling>
+If compound_api returns an error:
+1. Examine which parameter validation failed
+2. Adjust parameters based on the validation criteria provided
+3. Retry with corrected parameters
+4. If multiple attempts fail, explain to the user which constraints prevent the query
+</error_handling>
+</instructions>
+
+<formatting_rules>
+- SMILES notation should be in markdown with backticks: `[OH2]`
+- PNG images: ![Description](URL)
+- 3D molecule views: Begin with "Below you will find [description]" - the 3D viewer will be rendered at the end of your response.
+</formatting_rules>
+""",
+    tools=[compound_api, generate_molecule_view],
+    can_hand_off_to=["Compound Agent", "Gene Agent", "Moverz Agent", "Protein Agent", "Refmet Agent", "Study Agent", "Metabolomics RAG Agent"],
+    allow_parallel_tool_calls=False
 )

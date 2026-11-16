@@ -1,0 +1,15 @@
+{% extends "email/base.html" %}
+{% block content %}
+<h2 style="color:#2c3e50;">Welcome to BioInsight AI 🎉</h2>
+<p>Hello,</p>
+<p>Your BioInsight AI account has been <strong>approved</strong>.</p>
+<p>
+  <strong>Temporary Password:</strong>
+  <code style="background:#f4f4f4; padding:4px 6px; border-radius:4px;">{{ temp_password }}</code>
+</p>
+<p>
+  You can login at
+  <a href="{{ login_url }}" style="color:#1d72b8;">BioInsight AI Login</a>.
+</p>
+<p>Please change your password upon first login.</p>
+{% endblock %}

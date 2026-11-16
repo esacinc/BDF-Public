@@ -1,8 +1,11 @@
 import aiohttp
 import data_sources.metabolomics_workbench.mwb.api_validation_input_output as io_validation
-from llama_index.core.agent.workflow import FunctionAgent
+from agents.bioinsight_agent import BioInsightAgent
 from typing import Literal, Annotated
 from workflow_config.default_settings import Settings
+from log_helper.logger import get_logger
+
+logger = get_logger()
 
 #
 # MWB sub-agent specializing in one of seven context areas of the MWB REST API
@@ -10,8 +13,28 @@ from workflow_config.default_settings import Settings
 
 context = "moverz"
 
+async def call_moverz_endpoint(input_item: str, 
+                               input_value1: str, 
+                               input_value2: str, 
+                               input_value3: str,
+                               output_format: str) -> str:
+    """Make a call to a Metabolomic REST endpoint to fetch data."""    
+    baseURL = "https://www.metabolomicsworkbench.org/rest"
+    endpoint = f"{baseURL}/{context}/{input_item}/{input_value1}/{input_value2}/{input_value3}/{output_format}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(endpoint) as response:
+            if response.ok:
+                try:
+                    data = await response.json()
+                except:
+                    data = await response.text()
+                return data
+            else:
+                logger.error(f"[MWB REST API] Call failed with response: {response.status}:{response.reason}")
+                return response.reason
+
 # Annotated tool specifically for formulating a moverz endpoint
-def endpoint_kwargs(
+async def moverz_api(
     input_item: Annotated[
         Literal["LIPIDS", "MB", "REFMET", "exactmass"], 
         "One of LIPIDS | MB | REFMET | exactmass."
@@ -37,32 +60,14 @@ def endpoint_kwargs(
         "Return format of data. Can only be txt."
     ] = "txt"
 ) -> str:
-    f"""Function to validate keywords needed to construct a valid REST API URL path to retrieve {context} context data from the Metabolomics Workbench website."""
-    return f"{{'input_item': {input_item} 'input_value1': {input_value1}, 'input_value': {input_value2}, 'input_value2': {input_value3}, 'input_value3': {output_format}}}"
+    f"""Function to construct and call a valid REST API URL path to retrieve {context} context data from the Metabolomics Workbench website."""
+    kwargs = {'input_item': {input_item}, 'input_value1': {input_value1}, 'input_value2': {input_value2}, 'input_value3': {input_value3}, 'output_format': {output_format}}
 
+    data = await call_moverz_endpoint(**kwargs)
+    
+    return data
 
-async def call_moverz_endpoint(input_item: str, 
-                               input_value1: str, 
-                               input_value2: str, 
-                               input_value3: str,
-                               output_format: str) -> str:
-    """Make a call to a Metabolomic REST endpoint to fetch data."""    
-    baseURL = "https://www.metabolomicsworkbench.org/rest"
-    endpoint = f"{baseURL}/{context}/{input_item}/{input_value1}/{input_value2}/{input_value3}/{output_format}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(endpoint) as response:
-            if response.ok:
-                try:
-                    data = await response.json()
-                except:
-                    data = await response.text()
-                return data
-            else:
-                print(f"Error: {response.status}")
-                return None
-
-
-moverz_agent = FunctionAgent(
+moverz_agent = BioInsightAgent(
     name=f"{context.title()} Agent",
     description=(
         "Take a user plain language question, translate it appropriately into Metabolomics Workbench REST API endpoint keywords, call the API to get data, "
@@ -71,18 +76,42 @@ moverz_agent = FunctionAgent(
         "exact structures), or REFMET (a database of ~165,000 standardized names which includes both exact structures and bulk species detected by MS or NMR) databases "
         "by specifying an appropriate m/z value, ion type(adduct) and mass tolerance range."
     ),
-    system_prompt=(
-        f"You are an expert on the Metabolomics Workbench data source, specifically the {context} context of the REST API. Do not use outside knowledge.\n"
-        ""
-        "Step 1: Determine if the user is asking a follow up question about about data you've already retrieved. "
-        "If your memory provides enough detail then stop immediately and respond directly to the user. Do NOT proceed to the remaining steps.\n"
-        "Step 2: If you cannot answer the question using memory then use the following context: \n"
-        f"{io_validation.moverz}"
-        "and the 'endpoint_kwargs' tool to translate the plain language user query into appropriate endpoint keywords.\n"
-        ""
-        "Step 3: Use the tool 'call_moverz_endpoint' to fetch data and answer the query. If clarification is needed from the user be then ask for "
-        "clarification. If you have made ANY corrections to the user's query mention that in your response.\n"
-    ),
-    tools=[endpoint_kwargs, call_moverz_endpoint],
+    system_prompt=f"""
+<role>
+You are a specialized agent for the Metabolomics Workbench REST API, focused on the {context} context.
+Your primary function is to translate user queries into API calls and present results clearly then work with other agents as needed to provide a complete answer.
+</role>
+
+<background_information>
+API Keyword Input/Output Validation: 
+{io_validation.moverz}
+</background_information>
+
+<instructions>
+<workflow>
+1. Analyze the user's query to identify required API endpoints
+2. Use the 'moverz_api' tool to translate the user's query into API parameters and execute the call in a single operation
+3. Analyze the API response data to determine if additional endpoint calls are needed
+4. Repeat step 2 as necessary until you have sufficient information to answer the query
+5. Format your response with proper markdown
+6. Consider hand-off to other agents if the query extends beyond your context to provide a comprehensive answer
+</workflow>
+
+<response_guidelines>
+- Prioritize API data over general knowledge
+- Cite specific data points from responses
+- Acknowledge data limitations when present
+</response_guidelines>
+
+<error_handling>
+If moverz_api returns an error:
+1. Examine which parameter validation failed
+2. Adjust parameters based on the validation criteria provided
+3. Retry with corrected parameters
+4. If multiple attempts fail, explain to the user which constraints prevent the query
+</error_handling>
+</instructions>
+""",
+    tools=[moverz_api],
     can_hand_off_to=["Compound Agent", "Gene Agent", "Moverz Agent", "Protein Agent", "Refmet Agent", "Study Agent", "Metabolomics RAG Agent"]
 )

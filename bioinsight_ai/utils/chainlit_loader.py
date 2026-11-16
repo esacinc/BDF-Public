@@ -2,7 +2,7 @@
 
 import chainlit as cl
 
-async def update_loader_message(loader_msg, loader_state, loader_id, new_message: str = "", remove: bool = False):
+async def update_loader_message(loader_msg, loader_state, loader_id, new_message: str = "", remove: bool = False) -> dict:
     """
     Update or remove the Chainlit loader message in a clean and state-aware way.
 
@@ -16,16 +16,19 @@ async def update_loader_message(loader_msg, loader_state, loader_id, new_message
     Usage:
         await update_loader_message(loader_msg, loader_state, loader_id, "Loading...")
         await update_loader_message(loader_msg, loader_state, loader_id, remove=True)
+    
+    Return: 
+        Loader state dictionary with 'loader_msg' key for setting in user state.
     """
     if remove or not new_message:
         if loader_state["sent"]:
             await loader_msg.remove()
             loader_state["sent"] = False
             loader_state["last_message"] = None
-        return
+        return loader_state | {'loader_msg': loader_msg}
 
     if new_message == loader_state["last_message"] and loader_state["sent"]:
-        return  # No update needed
+        return  loader_state | {'loader_msg': loader_msg} # No update needed
 
     loader = cl.CustomElement(
         name="loader",
@@ -41,3 +44,5 @@ async def update_loader_message(loader_msg, loader_state, loader_id, new_message
         loader_state["sent"] = True
 
     loader_state["last_message"] = new_message
+    
+    return loader_state | {'loader_msg': loader_msg}

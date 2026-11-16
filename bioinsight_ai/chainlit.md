@@ -1,33 +1,67 @@
-🧠 Bioinsight AI Chatbot Prototype Documentation
-================================================
-
-**Version:** 2.4.0
-**Project:** Biomedical data discovery and exploration BDF Task Area 3
-**Last Updated:** July 2025
+🧠 BioInsight AI Chatbot Public Preview
+========================================
+**Status:**  Public Preview (Exploratory)
+**Project:** ARPA-H Biomedical Data Fabric
+**Last Updated:** November 2026
 
 ## 📌 Overview
-This is an **early-stage prototype** of a chatbot built to help users explore biomedical data using natural language queries. The chatbot aims to support intuitive discovery and summarization of public cancer data by allowing users to ask questions in plain English instead of manually querying APIs or browsing filters.
+BioInsight is an exploratory, AI-enabled chatbot intended to support discovery and exploration of publicly available biomedical data using natural language queries. The tool allows users to ask questions in plain English to facilitate high-level exploration and summarization of public cancer datasets, rather than directly querying APIs or navigating complex data interfaces.
+This Public Preview is provided for informational and exploratory purposes only. Functionality, responses, data coverage, and performance may change over time as the tool is further developed and refined.
 
 ## ⚙️ Capabilities (Current Release)
-The prototype is designed to:
-- Answer  **natural language queries** related to data from select biomedical resources and databases.
-- Identify relevant studies, disease types, and experimental strategies.
-- Allow basic **filtering by program, study, disease, and analyte.**
-- Provide visual **summaries and counts** of available datasets.
-- Perform correlation analysis of protein and/or gene expression data and visualize through plots and heatmaps.
-- Assist researchers in discovering **what data exists** and **how it's structured** without needing technical expertise.
+**BioInsight is designed to help researchers discover, explore, and make sense of complex cancer data across distributed public resources — using natural language.**
 
-## 📂 Data Sources Currently Used
+### 🔍 Discovery
+- Discover what cancer data exists across diverse multiomic resources including proteomics, genomics, imaging, metabolomics and lipidomics.
+- Identify relevant programs, studies, cohorts, and data types by disease, modality, or program.
+- Understand where data lives and how it is organized, without navigating individual portals.
+
+### 🧭 Exploration
+- Explore study- and cohort-level metadata, including demographics, biospecimens, and experimental strategies.
+- Compare studies within and across programs through conversational follow-ups.
+- Maintain context across multi-step questions without needing technical knowledge of schemas or APIs.
+
+### 📊 Visualization
+- View interactive summaries, distributions, and cohort breakdowns.
+- Visualize molecular data (expression plots, heatmaps) and survival trends (Kaplan–Meier).
+- Discover and interact with imaging collections and derived visual outputs.
+
+### 🧪 Analysis (Exploratory)
+- Perform lightweight, exploratory analyses to assess dataset relevance.
+- Support handoff to external tools and workflows for deeper analysis.
+
+### 🎥 Demo Videos
+Short demo videos showcasing BioInsight’s discovery, exploration, and visualization capabilities are available on our YouTube channel:
+- Natural language discovery across proteomics, genomics, and imaging data
+- Exploring cohorts, demographics, and study metadata
+- Interactive molecular and imaging visualizations
+- Cross-repository exploration and follow-up queries
+
+**👉 Watch the demos:** [YouTube channel](https://www.youtube.com/@bioinsightai)
+
+## 📂 Data Sources Currently Supported
+BioInsight integrates and explores data from multiple public biomedical repositories, with a primary focus on cancer research data. Support spans **core CRDC resources, imaging collections**, and **external omics repositories**, with ongoing expansion.
 ### Cancer Research Data Commons (CRDC)
+BioInsight provides deep, first-class support for select CRDC nodes:
 - **Proteomic Data Commons (PDC)**
-- **Genomic Data Commons (GDC)**
-- **Imaging Data Commons (IDC)**
-#### ProteomeXchange Resources
-- **PRIDE**
-#### Additional Repositories
-- **Metabolomics Workbench (MWB)** – for metabolomics data  
-
-**⚠️ Note:** Integration with these sources is a work in progress. Not all resources are fully connected yet. Responses may vary depending on data availability and current coverage.
+Mass spectrometry–based datasets from large cancer proteogenomic programs (e.g., CPTAC), including proteome, phosphoproteome, glycoproteome, ubiquitinome, acetylome, and select metabolomics and lipidomics data.
+- **Genomic Data Commons (GDC)** 
+Genomic, transcriptomic, and clinical data across major cancer programs (e.g., TCGA, TARGET, CPTAC), supporting cohort discovery, gene expression, and survival analysis.
+- **Imaging Data Commons (IDC)** 
+Cancer imaging collections and metadata supporting imaging discovery, filtering, visualization, and image-derived workflows.
+#### 🖼️ Cancer Imaging Collections (Accessed via IDC & Imaging Workflows)
+- **The Cancer Imaging Archive (TCIA)**
+Public cancer imaging datasets accessible through IDC and associated imaging services.
+- **Medical Imaging and Data Resource Center (MIDRC)**
+Imaging collections and metadata accessed through shared imaging infrastructure and workflows.
+#### 🌍 External Omics Repositories
+- **ProteomeXchange Resources**
+	- **PRIDE** – Proteomics datasets and metadata for discovery and contextual exploration.
+- **Metabolomics Workbench (MWB)**
+Metabolomics studies and metadata, with a focus on cancer-related datasets and treatment response.
+ 
+## ⚠️ Integration Status
+BioInsight is under active development. All listed sources are supported for **data discovery**, while the depth of exploration, visualization, and analysis varies by resource as integrations continue to mature.
 
 ## ⚠️ Assumptions and Known Limitations
 Our chatbot integrates multiple data sources (e.g., CRDC, PX, MWB), bringing rich information access via a natural language interface. However, there are a few limitations to keep in mind:
@@ -50,7 +84,7 @@ Missing or inconsistent metadata can limit how detailed or accurate some answers
 The chatbot sometimes needs to translate broad, human-friendly questions into API-specific queries, which isn’t always straightforward.
 
 ## 💬 Example Use Cases and Questions
-These are example prompts you can paste into the Bioinsight chatbot to explore multi-omic and imaging data across integrated biomedical datasets. 
+These are example prompts you can paste into the BioInsight chatbot to explore multi-omic and imaging data across integrated biomedical datasets. 
 ________________________________________
 ### **🧠 Multi-Omics Data Exploration**
 #### **🔬 GBM & Cross-Study Discovery (PDC & GDC)**
@@ -80,42 +114,29 @@ ________________________________________
 #### **📦 Collection-Level Summary**
 - _How many collections are hosted on IDC?_
 - _List all the collections hosted on IDC._
-- _How many body parts are represented across all IDC collections?_
-- _List all body parts represented in IDC._
-- _How many imaging modalities are present across IDC datasets?_
-- _List all the imaging modalities used in IDC._
+- _How many body parts are represented across all IDC collections? List all of them_
+- _How many imaging modalities are present across IDC datasets? List all of them_
 - _How many MRI sequences are present in IDC?_
-- _List all MRI sequences available on IDC._
-- _What is the download size of each IDC collection in GB?_
 - _For each IDC collection, list the number of images and patients._
 - _For each collection, count the number of modalities and body parts._
-- _For each collection, list body parts, modalities, and series descriptions._
 
 #### **🔍 Cohort & Image Queries**
 - _How many male brain MRI images are hosted on IDC?_
 - _How many brain MRI images of male patients older than 5 years are in IDC?_
-- _Give me the patient IDs and study dates for all pediatric studies on IDC._
+- _How many patients are in all pediatric studies on IDC._
 - _How many patients are there in the nsclc_radiomics collection?_
-- _List all segmentation images in the nsclc_radiomics collection._
 - _What IDC collections contain GBM images?_
 - _What collections have lung CT images?_
 - _Which collections have both PET and CT scans?_
 - _Which MRI scanners were used across IDC datasets?_
 
-#### **📥 Download-Ready Queries**
-- _Download all T2-weighted breast MRI images from IDC._
-- _Download all PET scans from lung cancer studies on IDC._
-- _Download all brain MRI data from IDC._
-- _Download only T2 and FLAIR scans from the upenn_gbm collection._
-- _Download male patient data from the upenn_gbm collection._
-
 #### **📊 Subgroup Analysis (e.g., upenn_gbm)**
-- _For the upenn_gbm collection, how many patients, images, modalities, body parts, sequences, and scanners are there?_
-- _List all modalities, body parts, sequences, and scanners in the upenn_gbm collection._
-- _For the upenn_gbm collection, how many male and female patients are there?_
-- _How many teenagers are in the upenn_gbm collection?_
-- _For the upenn_gbm collection, how many patients are under 25, between 25 and 50, and over 50 years old?_
-- _For the upenn_gbm collection, how many patients correspond to each scanner?_
+- _For the IDC upenn_gbm collection, how many patients, images, modalities, body parts, sequences, and scanners are there?_
+- _List all modalities, body parts, sequences, and scanners in the IDC upenn_gbm collection._
+- _For the IDC upenn_gbm collection, how many male and female patients are there?_
+- _How many teenagers are in the IDC upenn_gbm collection?_
+- _For the IDC upenn_gbm collection, plot distribution of patient data by age using the following bins: under 25, between 25 and 50, and over 50 years old?_
+- _For the IDC upenn_gbm collection, how many patients correspond to each scanner?_
 
 ### **📚 Additional Use Cases**
 #### **🔗 External Repositories**
@@ -124,7 +145,7 @@ ________________________________________
 - _Find studies analyzing the metabolite glutamine in brain cancer across all platforms._
 
 #### **🧠 Research Context**
-- What are the analytical challenges in performing a pan-cancer analysis?_
+- _What are the analytical challenges in performing a pan-cancer analysis?_
 
 ## 🔍 What’s Next
 We are continuing to expand our capabilities, including:
@@ -135,8 +156,6 @@ We are continuing to expand our capabilities, including:
 - Visual summaries
 
 ## 🤝 Feedback & Contact
-We welcome input! Please share:
-- Questions the chatbot didn’t answer well
-- Ideas for new features or data sources
-- Suggestions for user documentation or onboarding
+We’d love to hear from you! If you have feedback, questions, or suggestions, feel free to reach out to us at <bioinsight-ai@icf.com>. Your input helps us improve BioInsight.
 
+**Version:** 4.12.16

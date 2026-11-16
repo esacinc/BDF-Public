@@ -1,17 +1,4 @@
-﻿/* Increase the size of spinner icon when loading the response */
-svg.lucide.lucide-loader {
-    height: 56px !important;
-    width: 56px !important;
-}
-
-button.inline-flex:nth-child(1) {
-    border-color: blue;
-    font-size: large;
-}
-
-/*button.inline-flex.items-center.justify-center.gap-2.whitespace-nowrap.rounded-md.text-sm.font-medium.ring-offset-background.transition-colors.focus-visible:outline-none.focus-visible:ring-2.focus-visible:ring-ring.focus-visible:ring-offset-2.disabled:pointer-events-none.disabled:opacity-50.[&_svg]:pointer-events-none.[&_svg]:size-4.[&_svg]:shrink-0.border.border-input.bg-background.hover:bg-accent.hover:text-accent-foreground.h-10.px-4.py-2 */
-
-/* AHB-285 nMake the ICF icon on the right side smaller and fit the screen */
+﻿/* AHB-285 Make the ICF icon on the right side smaller and fit the screen */
 /* light theme */
 html.light div.relative.hidden.bg-muted.lg\:block {
     background-color: white !important;
@@ -28,8 +15,210 @@ img.absolute.inset-0.h-full.w-full {
     width: auto !important;
 }
 
-/* AHB-286 increase the size of blinking dot when the chabot is thinking about a response */
-span.inline-block.h-3\.5.w-3\.5.bg-foreground.rounded-full.animate-pulse {
-    height: 42px !important; /* Double the height */
-    width: 42px !important; /* Double the width */
+/* Hide Chainlit's default profile dropdown */
+[data-testid="profile-button"] {
+  display: none !important;
+}
+
+/* Hide built-in Logout menu item reliably */
+[data-radix-menu-content] [role="menuitem"] .lucide-log-out {
+  display: none !important;
+}
+[data-radix-menu-content] [role="menuitem"]:has(.lucide-log-out) {
+  display: none !important;
+}
+
+/* === BioInsight custom header === */
+#bioinsight-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f9fafb;
+  color: #111827;
+  padding: 0 16px;
+  border-bottom: 1px solid #e5e7eb;
+  /* height, z-index, and pointer-events are set in the layout-offsets section */
+}
+
+#bioinsight-logo {
+  height: 28px;
+  cursor: pointer;
+}
+
+/* Swap logo in dark mode */
+html.dark #bioinsight-logo {
+  content: url("/logo_dark.png");
+}
+
+/* Centered user info */
+#bioinsight-user {
+  font-size: 0.9rem;
+  color: inherit;
+  flex: 1;
+  text-align: center;
+}
+
+/* Right-side controls (admin link + logout) */
+#bioinsight-controls {
+  display: flex;
+  gap: 8px;
+}
+
+/* Verify Pending Users link (admin only) */
+#bioinsight-admin {
+  background: #2563eb; /* blue-600 */
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  text-decoration: none;
+  transition: background 0.2s ease-in-out;
+}
+#bioinsight-admin:hover {
+  background: #1d4ed8; /* blue-700 */
+}
+html.dark #bioinsight-admin {
+  background: #3b82f6;
+}
+html.dark #bioinsight-admin:hover {
+  background: #2563eb;
+}
+
+/* Logout button */
+#bioinsight-logout {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s ease-in-out;
+}
+#bioinsight-logout:hover {
+  background: #b91c1c;
+}
+
+html.dark #bioinsight-header {
+  background: #1f2937;
+  color: white;
+  border-bottom: 1px solid #374151;
+}
+
+/* === Layout offsets === */
+:root {
+  --bio-header-h: 56px;       /* Header height */
+  --chat-bottom-gap: 32px;    /* Extra lift for chat input */
+}
+
+body, .cl-root, .cl-app {
+  padding-top: var(--bio-header-h) !important;
+}
+
+/* Keep headers layered correctly */
+.cl-header {
+  position: relative;
+  z-index: 2;
+}
+#bioinsight-header {
+  height: var(--bio-header-h) !important;
+  pointer-events: none;
+  z-index: 3;
+}
+#bioinsight-header * {
+  pointer-events: auto;
+}
+
+/* Defensive: don’t hide key buttons */
+button[aria-label="New chat"],
+[data-testid="new-chat-button"],
+button[aria-label="Toggle sidebar"],
+[data-testid="sidebar-toggle"] {
+  display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+/* === Lift chat input off the bottom === */
+.cl-chat,
+[class*="cl-chat"] {
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--chat-bottom-gap) + 96px) !important;
+  /* 96px ≈ input bar height + gap */
+}
+
+.cl-chat-input,
+[class*="chat-input"],
+[data-testid="chat-input"],
+[data-testid="input-box"] {
+  position: sticky !important;
+  bottom: calc(env(safe-area-inset-bottom) + var(--chat-bottom-gap)) !important;
+  z-index: 5 !important;
+}
+
+.cl-footer,
+[class*="cl-footer"] {
+  position: sticky !important;
+  bottom: calc(env(safe-area-inset-bottom) + var(--chat-bottom-gap)) !important;
+  z-index: 5 !important;
+}
+
+/* Resize BioInsight avatar icon (the assistant avatar next to messages) */
+/* Scoped to the ai-message context to avoid affecting unrelated Radix elements */
+.ai-message span[data-state] {
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 0 !important;
+}
+
+.ai-message span[data-state] > img {
+  width: 100% !important;
+  height: 100% !important;
+  image-rendering: auto;
+  object-fit: contain;
+  border-radius: 0 !important;
+}
+
+/* Hide UI MCP icon while developing mcp decorators in chainlit_app.py */
+svg.lucide-plug {
+  display: none !important;
+}
+
+/* === Scroll-to-top button === */
+/* Styled to match Chainlit's built-in scroll button (border, bg-background, rounded-full) */
+#bioinsight-scroll-top {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 9999;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, background 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#bioinsight-scroll-top.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+#bioinsight-scroll-top:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
 }

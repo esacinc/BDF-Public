@@ -1,9 +1,9 @@
-from config import MWB_KB_ID, AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_REGION, MWB_SOURCE_ID
+from config import MWB_KB_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, MWB_SOURCE_ID
 from llama_index.retrievers.bedrock import AmazonKnowledgeBasesRetriever
 from llama_index.core import get_response_synthesizer
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.tools import QueryEngineTool
-from llama_index.core.agent.workflow import FunctionAgent
+from agents.bioinsight_agent import BioInsightAgent
 from workflow_config.default_settings import Settings
 
 #
@@ -14,8 +14,8 @@ from workflow_config.default_settings import Settings
 # AWS KB Web Crawler
 retriever = AmazonKnowledgeBasesRetriever(
     knowledge_base_id=MWB_KB_ID,
-    aws_access_key_id=AWS_ACCESS_KEY,
-    aws_secret_access_key=AWS_SECRET_KEY,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     region_name=AWS_REGION,
     retrieval_config={
         "vectorSearchConfiguration": {
@@ -44,7 +44,7 @@ rag_tool = QueryEngineTool.from_defaults(
     ) 
 )
 
-rag_agent = FunctionAgent(
+rag_agent = BioInsightAgent(
     name="Metabolomics RAG Agent",
     description=(
         "An expert assistant for answering general questions about the Metabolomics Workbench website. "

@@ -1,899 +1,705 @@
-import asyncio
 import json
 import re
 from log_helper.logger import get_logger
 logger = get_logger()
-import pandas as pd
-from io import StringIO
-from typing import Any
-import ast
+from typing import List, Union
 from plotly.graph_objs import Figure
-import plotly.graph_objects as go
-import uuid
-import time
 
 from llama_index.core.llms import ChatMessage
+from llama_index.core.memory import Memory, FactExtractionMemoryBlock
 from llama_index.core.workflow import (
     step,
     Context,
-    Event,
     StartEvent,
     StopEvent,
     Workflow,
-    HumanResponseEvent
 )
+from llama_index.core.agent.workflow import ToolCall
+from llama_index.core.base.llms.types import ThinkingBlock # from llama_index.core.llms import ThinkingBlock newer llama_index versions
 from llama_index.llms.bedrock_converse import BedrockConverse
-from llama_index.core.prompts import PromptTemplate
 from workflow_config.default_settings import Settings
 from workflow_config.events import (
-    CRDCEvent, 
-    EvaluateEvent, 
-    GraphEvent, 
-    JudgeEvent, 
-    MWBEvent, 
-    PXEvent, 
-    BDIEvent,
-    ResponseEvent)
-from workflow_config.steps.metabolomics_workbench import MWBOutput
-from workflow_config.steps.evaluate_response import answer_evaluator, EventReplicator
-from workflow_config.steps.intent_recognition.agent import create_intent_agent, Intent, ContextAugmentedIntentRecognitionAgent, USER_QUERY_TEMPLATE
-from agents.biomedical_data_integration.agent import create_bdi_agent
-from agents.biomedical_data_integration.interaction.chainlit_interaction_event import ChainlitInteractionEvent
-from workflow_config.steps.synthesize import context_enriched_prompt
-from workflow_config.steps.cancer_research_data_commons.citations import add_citations_and_journal_urls
-from data_sources.metabolomics_workbench.workflow import create_mwb_workflow
-from data_sources.cancer_research_data_commons import agent as crdc
-from data_sources.proteome_exchange import agent as px
-from utils.intent_recognition_helpers import safe_intent_recognition
-from workflow_config.steps.intent_recognition.intent import Intent 
+    ConcludeEvent, 
+    ResponseEvent
+)
+
+from workflow_config.steps.synthesize import SYNTHESIZE_SYSTEM_PROMPT, SYNTHESIZE_TEMPLATE
+from workflow_config.steps.execute_plan.prompts import AGENT_PROMPT
+from workflow_config.memory.prompts import FACT_EXTRACTION_PROMPT, FACT_CONDENSE_PROMPT
+from agents.bioinsight_agent import BioInsightAgent
+from agents.bioinsight_agent_workflow import BioInsightAgentWorkflow
+from agents.agent_registry import AgentRegistry
+from agents.processed_output import ProcessedOutput
+from agents.plotting_agent import agent as plotting_agent
+from workflow_config.steps.orchestration.plan import Plan
+from workflow_config.steps.orchestration.prompts import ORCHESTRATION_SYSTEM_PROMPT, ORCHESTRATION_TEMPLATE
+from data_sources.metabolomics_workbench import agent as mwb_agent
+from data_sources.cancer_research_data_commons.agent import agent as crdc_agent
+from data_sources.proteome_exchange.agent import agent as px_agent
+from data_sources.clinical_trials.agent import agent as ct_agent
 from utils.transform import transform_wide_to_long  
 from utils.udi_helpers import build_heatmap_udi_spec, infer_heatmap_fields
 from utils.tracing import Tracer
+from utils.plotting_agent_helpers import draw_graph as helper_draw_graph
 
-# Add fallback Intent for robustness
-fallback_intent = Intent(
-    intent="unknown",
-    confidence=0.0,
-    context_enriched_query=None,
-    off_topic=False,
-    off_topic_reply="Sorry, I couldn't determine what you need.",
-    harmonization=False,
-    plot=False,
-    sources=[],
-    reply="Sorry, I couldn't process your request.",
-    source_contexts={}
-)
-
-class BioinsightWorkflow(Workflow):
+class BioInsightWorkflow(Workflow):
     def __init__(
         self,
         session_id: str,
-        intent_agent: ContextAugmentedIntentRecognitionAgent,
-        mwb_session: dict,
-        bdi_session: dict,
+        agent_registry: List[Union[BioInsightAgent, BioInsightAgentWorkflow]],
         llm: BedrockConverse | None = None,
-        code_llm: BedrockConverse | None = None,
-        response_eval: bool = True,
+        thinking_llm: BedrockConverse | None = None,
         presigned_s3_client=None,
+        memory_token_limit: int = 500000,
+        agent_history_turns: int = 2,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.llm = llm
-        self.code_llm = code_llm
+        self.thinking_llm = thinking_llm or Settings.thinking_llm # thinking_llm is an optional separate LLM used for internal "thinking"/planning tasks.
         self.logger = logger
-        self.response_eval = response_eval
         self.presigned_s3_client = presigned_s3_client
         self.session_id = session_id
-
-        self.agents = {
-            "intent": {
-                "agent": intent_agent,
-                "memory": intent_agent.memory
-            },
-            "bdi": bdi_session,
-            "mwb": mwb_session
-        }
-
-        self.intent_agent = intent_agent
-        self.intent_memory = intent_agent.memory
+        self.agents = AgentRegistry(agents=agent_registry)
+        self.default_error_msg = ChatMessage(role="assistant", content="Apologies, I encountered an error while processing your request. Please try again later or rephrase your query.")
+        self.memory = Memory.from_defaults(
+            session_id=session_id,
+            token_limit=memory_token_limit,
+            token_flush_size=50000,
+            memory_blocks=[
+                FactExtractionMemoryBlock(
+                    name="condensed_conversation_history",
+                    llm=self.llm,
+                    max_facts=50,
+                    priority=0,
+                    fact_extraction_prompt_template=FACT_EXTRACTION_PROMPT,
+                    fact_condense_prompt_template=FACT_CONDENSE_PROMPT,
+                ),
+            ],
+        )
+        self.agent_history_turns = agent_history_turns
             
     @classmethod
-    async def new_session(cls, session_id, llm, code_llm, presigned_s3_client, **kwargs):
-        intent_agent = await create_intent_agent(session_id)
-        bdi_session = create_bdi_agent(session_id)
-        mwb_session = create_mwb_workflow(session_id)
-
-        return cls(
+    async def new_session(cls, session_id, agents, llm, presigned_s3_client, memory_token_limit: int = 500000, agent_history_turns: int = 2, **kwargs):
+        instance = cls(
             session_id=session_id,
-            intent_agent=intent_agent,
-            bdi_session=bdi_session,
+            agent_registry=agents,
             llm=llm,
-            code_llm=code_llm,
-            response_eval=True,
+            thinking_llm=kwargs.get('thinking_llm', None),
             presigned_s3_client=presigned_s3_client,
-            mwb_session=mwb_session,
+            memory_token_limit=memory_token_limit,
+            agent_history_turns=agent_history_turns,
             **kwargs
         )
-
-    async def exec_plot_code(self, command: str) -> Figure:
-        def _run():
-            lcls = {}
-            command_prefix = (
-                "import plotly\nimport pandas as pd\nimport plotly.express as px\n"
-                "import plotly.graph_objects as go\n"
-                "from plotly.subplots import make_subplots\n"
-                "import ipywidgets as widgets\n"  
-                "import os\n"
-                "import pydicom\n"
-            )
-            full_command = command_prefix + command
-            #lcls["data_frame"] = self.df  # inject the dataframe explicitly
-            # === Conditionally inject DataFrames ===
-            if hasattr(self, "df") and isinstance(self.df, pd.DataFrame) and not self.df.empty:
-                lcls["data_frame"] = self.df
-            if hasattr(self, "df1") and isinstance(self.df1, pd.DataFrame) and not self.df1.empty:
-                lcls["df1"] = self.df1
-            if hasattr(self, "df2") and isinstance(self.df2, pd.DataFrame) and not self.df2.empty:
-                lcls["df2"] = self.df2
-
-            try:
-                self.logger.debug("Executing plot code:\n%s", command[:500])  
-                exec(full_command, globals(), lcls)
-                fig = lcls["fig"]
-                fig.update_layout(margin=dict(autoexpand=True))
-                self.logger.info("Plotly figure generated successfully.")
-                return fig
-            except Exception as e:
-                self.logger.exception("Failed to execute plot code.")
-                raise e
-
-        return await asyncio.to_thread(_run)
-
-    async def parse_response_content(self, response, index=0):
-        raw_content = response.sources[index].content.strip()
-
-        df = None  # Default to None if nothing works
-
-        # === Attempt 1: ast.literal_eval + tuple-extract + read_json ===
-        try:
-            parsed_object = ast.literal_eval(raw_content)
-            self.logger.debug(f"[PARSE] ast.literal_eval success. Type: {type(parsed_object)}")
-
-            if isinstance(parsed_object, dict):
-                self.logger.debug("[PARSE] Parsed object is a dict, converting to DataFrame.")
-                df = pd.DataFrame(parsed_object)
-                return df
-            elif isinstance(parsed_object, tuple) and len(parsed_object) > 0:
-                json_string = parsed_object[0]
-                self.logger.debug("[PARSE] Extracted JSON string from tuple. Attempting pd.read_json...")
-                df = await asyncio.to_thread(pd.read_json, StringIO(json_string), orient='records')
-                return df
-            else:
-                self.logger.debug("[PARSE] Parsed object was not a usable tuple or dict.")
-        except Exception as e1:
-            self.logger.debug(f"[PARSE] Attempt 1 (ast.literal_eval) failed: {e1}")
-
-        # === Attempt 2: Replace quotes and try raw JSON ===
-        try:
-            cleaned = raw_content.replace("'", '"')  # Naive cleanup
-            df = await asyncio.to_thread(pd.read_json, StringIO(cleaned))
-            return df
-        except Exception as e2:
-            self.logger.debug(f"[PARSE] Attempt 2 (quote-replace read_json) failed: {e2}")
-
-        # === Attempt 3: Try 'split' orientation ===
-        try:
-            self.logger.debug("[PARSE] Trying orient='split' read_json...")
-            df = await asyncio.to_thread(pd.read_json, StringIO(raw_content), orient='split')
-            return df
-        except Exception as e3:
-            self.logger.debug(f"[PARSE] Attempt 3 (orient='split') failed: {e3}")
-
-        self.logger.error(f"[PARSE] ❌ All parse attempts failed for source[{index}].")
-        return None
-
-    async def draw_graph(self, ctx: Context,response, query):
-        self.logger.info("start draw_graph")
-        tracer = Tracer(label="draw_graph")
-        one_dataset = True
-
-        if len(response.sources) > 2:
-            self.logger.warning("More than 2 datasets provided; only 2 are supported.")
-            return -1
-
-        if len(response.sources) == 2:
-            self.logger.info("Detected 2 datasets — delegating to draw_graph_two_datasets.")
-            one_dataset = False       
-            return await self.draw_graph_two_datasets(response, query)
-
-        if len(response.sources) == 0:
-            self.logger.error("No sources found in response: %s", response)
-            return -1
-
-        if one_dataset:
-            # df = await asyncio.to_thread(pd.read_json, StringIO(response.sources[0].content.replace("'", "\"")))
-
-            self.logger.info("Processing single dataset for graph generation.")
-            raw_content = response.sources[0].content
-            self.logger.debug(f"DEBUG: repr(raw_content) is: {repr(raw_content)}")
-
-            df = None # Initialize df to None
-            try:
-                async with tracer.async_step("parse_response_content"):
-                    df = await self.parse_response_content(response)
-
-            except Exception as e:
-                self.logger.warning(f"FATAL: An error occurred during the new parsing process. Error: {e}")
-                return -1 # Or return an error message
-    
-            # --- From here, your logic continues as before ---
-            if df is None or len(df.index) < 1:
-                self.logger.warning("No data found or DataFrame could not be created.")
-                return -1
         
-            self.logger.info("SUCCESS: DataFrame created successfully!")
-            self.logger.info(df.head())
-        
-            if len(df.index)<1:
-                self.logger.warning("Parsed dataframe is empty.")
-                return -1
-
-            data_frame = df
-            head = str(data_frame.head().to_dict())
-            desc = str(data_frame.describe().to_dict())
-            cols = str(data_frame.columns.to_list())
-            dtype = str(data_frame.dtypes.to_dict())
-
-            # === HEATMAP CONDITIONAL ===
-            query_lower = query.lower()
-
-            if re.search(r"heat[\s\-]?map", query_lower):
-                self.logger.info("[HEATMAP] Detected request for a heatmap chart.")
-                return await self.draw_graph_heatmap(ctx,df)
-            else:
-                self.logger.info("[HEATMAP] No heatmap requested, using generic code generation.")
-
-            final_query = f"""
-                    The dataframe name is 'data_frame'. The dataframe has the columns {cols} and their datatypes are {dtype}. 
-                    The format of data_frame is: {desc}. The head of df is: {head}.
-
-                    **Instructions:**
-                    1.  **Always create a graph object and assign it to a variable named `fig`**. This is mandatory for all plotting commands.
-                    2.  For interactive plots that use widgets (like sliders), you must first create a default or initial version of the plot and assign it to the `fig` variable. Then, you can define the interactive components.
-                    3.  Use the exact column names provided. Do not guess column names.
-                    4.  Generate only Python code using the `plotly` library for the query: {query}
-                    5.  Do not use `print()` or `fig.show()`.
-                    6.  Do not use `data_frame.info()`.
-                    7.  NEVER output markdown backticks (```).
-                    8.  Import all necessary libraries.
-                    9.  Use valid Plotly marker symbols and include appropriate axis titles and legends.
-                    10. Use only valid, current properties for Plotly objects. For example, the correct property for a color scale is 
-                        `colorscale` like this: `go.Heatmap(z=..., colorscale='Viridis')`
-                    11. Use valid names like `cross`, `x`, or `circle`. For instance, to make a plus sign marker, the correct value is `cross`"""
-
-            message = [ChatMessage(role="user", content="""You are an expert Python developer who works with pandas and plotly. 
-                                Just output the code, nothing else or other text is needed""")]
-            message.append(ChatMessage(role="user", content=final_query))
-
-            self.logger.debug("Sending initial plot generation query to code LLM.")
-            async with tracer.async_step("generate_plot_code"):
-                response = await self.code_llm.achat(message)
-
-            command = response.message.blocks[0].text
-            self.logger.debug("Reflecting on query...")
-
-            reflection_query = f"""The user was asking: {final_query}. You answered with the python code: {command}.
-                Please check if this was the correct code and you followed the instructions properly.
-                Do not use ``` and the word python in the code.
-                Change update_xaxis to update_xaxes if using this function.
-                Respond with the correct python code. Do not output anything else."""
-
-            message = [ChatMessage(role="system", content="Your task is to analyze the provided Python code snippet, identify any bugs or errors present, and provide a corrected version of the code that resolves these issues. Explain the problems you found in the original code and how your fixes address them. The corrected code should be functional, efficient, and adhere to best practices in Python programming.")]
-            message.append(ChatMessage(role="user", content=reflection_query))
-
-            async with tracer.async_step("reflect_code"):
-                response = await self.llm.achat(message)
-            # Sometimes the LLM does not listen to you so manually replace the ```python stuff
-            command = response.message.blocks[0].text
-            command = command.replace('```python', '')
-            command = command.replace('```', '')
-
-            self.logger.debug("Reflected command:\n%s", command[:500])
-
+        # Register the PlottingAgent so plotting is available as a first-class agent
         try:
-            self.df = data_frame
-            
-            async with tracer.async_step("exec_plot_code"):
-                fig = await self.exec_plot_code(command)
-            
-            self.logger.info("Graph generated successfully.")
-            return fig
+            instance.agents["PlottingAgent"].llm = llm
+            instance.agents["PlottingAgent"].presigned_s3_client = presigned_s3_client 
+            instance.logger.info(f"Registered plotting agent '{instance.agents['PlottingAgent'].name}'")
         except Exception as e:
-            self.logger.exception("Exception occurred while generating graph.")
-            self.logger.debug("Failed command:\n%s", command)
-            return -1
-        
-    async def draw_graph_heatmap(self, ctx: Context, df: pd.DataFrame) -> dict:
+            instance.logger.warning(f"Failed to register PlottingAgent during new_session: {e}")
+
+        return instance
+
+    async def append_to_history(self, ctx: Context, user_message, assistant_message=None):
+        """Append a user/assistant exchange to the Memory object.
+
+        Parameters:
+        - ctx: workflow Context (kept for signature compatibility)
+        - user_message: the user's message text
+        - assistant_message: assistant response text; defaults to self.default_error_msg.content
         """
-        Specialized workflow for heatmap: transforms data, generates UDI spec,
-        uploads CSV + spec, draws the heatmap. Uses dynamic S3 keys.
-        """
-        self.logger.info("[HEATMAP] Starting dedicated heatmap workflow.")
-        tracer = Tracer(label="draw_graph_heatmap")
+        if assistant_message is None:
+            assistant_message = self.default_error_msg.content
+        if user_message:
+            await self.memory.aput(ChatMessage(role="user", content=str(user_message)))
+        if assistant_message:
+            await self.memory.aput(ChatMessage(role="assistant", content=str(assistant_message)))
 
-        # === Add index column if needed ===
-        if "Sample_Index" not in df.columns:
-            df = df.copy()
-            df.insert(0, "Sample_Index", df.index)
-            self.logger.info("[HEATMAP] Added Sample_Index column.")
-
-        # === Save wide CSV ===
-        async with tracer.async_step("save_wide_csv"):
-            wide_csv_path = "heatmap_wide.csv"
-            df.to_csv(wide_csv_path, index=False)
-
-        # === Transform wide -> long ===
-        async with tracer.async_step("transform_to_long"):
-            long_csv_path = "heatmap_long.csv"
-            transform_wide_to_long(wide_csv_path, long_csv_path)
-
-        # === Generate dynamic S3 object keys ===
-        file_uuid = str(uuid.uuid4())
-        csv_object_key = f"udi/{file_uuid}_heatmap.csv"
-        spec_object_key = f"udi/{file_uuid}_heatmap_udi_spec.json"
-        self.logger.info(f"[HEATMAP] S3 object keys: CSV={csv_object_key}, SPEC={spec_object_key}")
-
-        # === Upload CSV ===
-        async with tracer.async_step("upload_csv"):
-            csv_upload = await self.presigned_s3_client.upload_file(
-                file_path=long_csv_path,
-                object_key=csv_object_key,
-                mime="text/csv"
-            )
-            long_csv_url = csv_upload["url"]
-            self.logger.info(f"[HEATMAP] Uploaded long CSV to S3: {long_csv_url}")
-
-        # === Infer fields ===
-        async with tracer.async_step("infer_heatmap_fields"):
-            df_long = pd.read_csv(long_csv_path)
-            fields = infer_heatmap_fields(df_long)
-
-        # === Build UDI Spec ===
-        async with tracer.async_step("build_udi_spec"):
-            udi_spec = build_heatmap_udi_spec(
-                data_url=long_csv_url,
-                x_field=fields["x_field"],
-                y_field=fields["y_field"],
-                color_field=fields["color_field"],
-                title="Heatmap",
-                colorscale="RdBu",
-                zmin=-4,
-                zmax=4
-            )
-
-        # === Upload UDI Spec ===
-        async with tracer.async_step("upload_udi_spec"):
-            spec_data = json.dumps(udi_spec).encode("utf-8")
-            spec_upload = await self.presigned_s3_client.upload_file(
-                data=spec_data,
-                object_key=spec_object_key,
-                mime="application/json"
-            )
-            spec_url = spec_upload["url"]
-            self.logger.info(f"[HEATMAP] Uploaded UDI Spec to S3: {spec_url}")
-
-        # === Draw the Plotly Heatmap ===
-        async with tracer.async_step("draw_plotly_figure"):
-            fig = await self.draw_heatmap_from_udi_spec(udi_spec)
-            self.logger.info("[HEATMAP] Generated heatmap Plotly figure.")
-
-        tracer.report({"output_spec_url": spec_url})
-
-        return {
-            "figure": fig,
-            "udi_spec_url": spec_url,
-            "csv_url": long_csv_url
-        }
-
-    async def draw_heatmap_from_udi_spec(self, udi_spec: dict) -> go.Figure:
-        """
-        Draws a Plotly Heatmap from a UDI Grammar spec that uses:
-        - source
-        - optional transformation
-        - representation { mark, mapping, layout }
-        """
-        tracer = Tracer(label="draw_heatmap_from_udi_spec")
-
-        # 1) Get the data source
-        data_url = udi_spec["source"]["source"]
-        representation = udi_spec["representation"]
-        mapping = representation["mapping"]
-
-        # 2) Extract mapping fields
-        x_field = next(m for m in mapping if m["encoding"] == "x")["field"]
-        y_field = next(m for m in mapping if m["encoding"] == "y")["field"]
-
-        color_block = next(m for m in mapping if m["encoding"] == "color")
-        color_field = color_block["field"]
-
-        # 3) Read optional scale
-        scale = color_block.get("scale", {})
-        colorscale = scale.get("colorscale", "Viridis")
-        zmin = scale.get("zmin")
-        zmax = scale.get("zmax")
-
-        # 4) Load the CSV
-        async with tracer.async_step("load_csv"):
-            df = pd.read_csv(data_url)
-        self.logger.info(f"[HEATMAP] Loaded CSV: {df.shape}")
-
-        # 5) Pivot long-form to wide
-        async with tracer.async_step("pivot_dataframe"):
-            z_df = df.pivot(index=y_field, columns=x_field, values=color_field)
-        self.logger.info(f"[HEATMAP] Pivoted to z_df: {z_df.shape}")
-
-        # 6) Build Heatmap
-        async with tracer.async_step("build_plotly_figure"):
-            heatmap = go.Heatmap(
-                z=z_df.values,
-                x=z_df.columns.tolist(),
-                y=z_df.index.tolist(),
-                colorscale=colorscale,
-                zmin=zmin,
-                zmax=zmax,
-                colorbar=dict(title=color_field)
-            )
-            fig = go.Figure(data=heatmap)
-
-            # 7) Apply layout
-            layout = representation.get("layout", {})
-            fig.update_layout(
-                title=layout.get("title", "Heatmap"),
-                xaxis_title=layout.get("xaxis_title", x_field),
-                yaxis_title=layout.get("yaxis_title", y_field),
-                autosize=True
-            )
-
-        tracer.report({"source_url": data_url})
-        return fig
-
-    async def draw_graph_two_datasets(self, response, query):
-        tracer = Tracer(label="draw_graph_two_datasets")
-
+        # Log memory state and extracted facts
         try:
-            async with tracer.async_step("parse_response_content_1"):
-                df1 = await self.parse_response_content(response, index=0)
-            async with tracer.async_step("parse_response_content_2"):
-                df2 = await self.parse_response_content(response, index=1)
-        except Exception as final_e:
-            self.logger.warning(f"ERROR: All parsing attempts failed. The content is malformed. Final error: {final_e}")
-            return None
-
-
-        if df1 is None or df2 is None:
-            self.logger.error("❌ One or both DataFrames could not be parsed. Skipping graph generation.")
-            return -1
-        
-        if 'df1' in locals() and 'df2' in locals() and isinstance(df1, pd.DataFrame):
-            self.logger.debug("DataFrame created successfully!")
-            self.logger.debug(df1.head())
-
-            if len(df1.index) < 1:
-                self.logger.debug("df1 is empty.")
-                return -1
-            if len(df2.index) < 1:
-                self.logger.debug("df2 is empty.")
-                return -1
-
-            head1 = str(df1.head().to_dict())
-            head2 = str(df2.head().to_dict())
-            desc1 = str(df1.describe().to_dict())
-            desc2 = str(df2.describe().to_dict())
-            cols1 = str(df1.columns.to_list())
-            cols2 = str(df2.columns.to_list())
-            dtype1 = str(df1.dtypes.to_dict())
-            dtype2 = str(df2.dtypes.to_dict())
-
-            final_query = f"""The dataframe names are 'df1' and 'df2'. 
-                    df1 has the columns {cols1} and their datatypes are {dtype1}. 
-                    df2 has the columns {cols2} and their datatypes are {dtype2}. 
-                    df1 is in the following format: {desc1}. The head of df1 is: {head1}.
-                    df2 is in the following format: {desc2}. The head of df1 is: {head2}.
-                    You cannot use data_frame.info() or any command that cannot be printed. 
-                    Do not use print() in the generated code. 
-                    Always name the graph object as fig. Do not do fig.show()
-                    Use plotly for any graphing or drawing commands.
-                    Write python code using plotly for graphs for this query on the dataframes df1 and df2: {query}"""
-
-            self.logger.debug("Sending query to code LLM for two-dataset graph.")
-            message = [ChatMessage(role="system", content="You are an expert Python developer who works with pandas and plotly. Just output the code, nothing else or other text is needed")]
-            message.append(ChatMessage(role="user", content=final_query))
-
-            async with tracer.async_step("generate_plot_code"):
-                response = await self.llm.achat(message)
-
-            command = response.message.blocks[0].text
-            self.logger.debug("Initial command:\n%s", command[:500])
-
-            self.logger.debug("Reflecting on query to validate generated code.")
-            reflection_query = f"""The user was asking: {final_query}. You answered with the python code: {command}.
-                Please check if this was the correct code and you followed the instructions properly.
-                Do not use ``` and the word python in the code.
-                Change update_xaxis to update_xaxes if using this function.
-                Respond with the correct python code. Do not output anything else."""
-            message = [ChatMessage(role="system", content="Your task is to analyze the provided Python code snippet, identify any bugs or errors present, and provide a corrected version of the code that resolves these issues. Explain the problems you found in the original code and how your fixes address them. The corrected code should be functional, efficient, and adhere to best practices in Python programming.")]
-            message.append(ChatMessage(role="user", content=reflection_query))
-
-            async with tracer.async_step("reflect_code"):
-                response = await self.llm.achat(message)
-
-            command = response.message.blocks[0].text
-            command = command.replace('```python', '')
-            command = command.replace('```', '')
-            self.logger.debug("Reflected and corrected command:\n%s", command[:500])
-
-            try:
-                self.df = df1  # for legacy code compatibility
-                self.df1 = df1
-                self.df2 = df2
-
-                async with tracer.async_step("exec_plot_code"):
-                    fig = await self.exec_plot_code(command)
-                #clear to avoid memory leakage
-                self.df1 = None
-                self.df2 = None
-
-                tracer.report({"query": query})
-
-                self.logger.info("Graph successfully generated for two datasets.")
-                return fig
-            except Exception as e:
-                self.logger.exception("Error executing plot code for two-dataset graph.")
-                self.logger.debug("Command that caused failure:\n%s", command)
-                return -1
-        else:
-            self.logger.warning("DataFrame could not be created.")
-
-    @step
-    async def setup(self, ctx: Context, ev: StartEvent) -> JudgeEvent | StopEvent:
-        self.logger.info("Doing setup...")
-        await ctx.set("num_evaluations", 0)
-        await ctx.set("query", ev.query)
-        return JudgeEvent(query=ev.query)
-
-    @step()
-    async def intent_recognition(
-        self, ctx: Context, ev: JudgeEvent
-    ) -> CRDCEvent | MWBEvent | PXEvent | GraphEvent | BDIEvent | StopEvent | None:
-        tracer = Tracer(label="intent_recognition")
-        ctx.write_event_to_stream(ev)
-        agent, memory = self.agents['intent']['agent'], self.agents['intent']['memory']
-
-        async with tracer.async_step("run_safe_intent_recognition"):
-            intent = await safe_intent_recognition(agent, ev.query)
-
-        if intent.off_topic:
-            self.logger.warning("Query off topic.")
-            await memory.aput(ChatMessage(role="assistant", content=intent.off_topic_reply))
-            tracer.report({"query": ev.query, "intent": "off_topic"})
-            return StopEvent(result={'response': intent.off_topic_reply})
-        
-        if intent.context_enriched_query:
-            await ctx.set("enriched_query", intent.context_enriched_query)
-
-        if intent.harmonization:
-            self.logger.info("User requesting data harmonization.")
-            tracer.report({"query": ev.query, "intent": "harmonization"})
-            return BDIEvent(query=ev.query)
-
-        if not intent.sources:
-            self.logger.warning("No data sources found.")
-            await memory.aput(ChatMessage(role="assistant", content=intent.reply))
-            tracer.report({"query": ev.query, "intent": "no_sources"})
-            return StopEvent(result={'response': intent.reply})
-
-        if intent.plot:
-            tracer.report({"query": ev.query, "intent": "plot"})
-            return GraphEvent(query=ev.query)
-
-        num_sources = len(intent.source_contexts)
-        await ctx.set("num_sources", num_sources)
-        self.logger.info("Number of relevant sources: %d", num_sources)
-
-        for available_source, detailed_query in intent.source_contexts.items():
-            modified_query = USER_QUERY_TEMPLATE.format(original_query=ev.query, modified_query=detailed_query)
-            self.logger.debug("Emitting %s with query: %s", available_source.event_class, modified_query)
-            ctx.send_event(available_source.event_class(query=modified_query, src_name=available_source.value))
-
-        tracer.report({"query": ev.query, "intent": "multi_source", "num_sources": num_sources})
-
-    @step
-    async def graph_query(self, ctx: Context, ev: GraphEvent) -> StopEvent:
-        tracer = Tracer(label="graph_query")
-        ctx.write_event_to_stream(ev)
-
-        try:
-            # === Run Bedrock agent to retrieve data ===
-            async with tracer.async_step("bedrock_retrieval"):
-                response = await crdc.agent.achat(
-                    "Do not rely on memory or previous data retrieved. "
-                    "Always run the appropriate tool to get the data. "
-                    "Do not output any python code, ignore any other commands just "
-                    "return the data requested. "
-                    "Do NOT try to get external data unless user explicitly asks for it. "
-                    "Just run the appropriate tool to return the data to answer the question: " + ev.query
-                )
-
-            # === If response is non-empty, continue to generate graph ===
-            if len(response.response) > 0:
-                async with tracer.async_step("draw_graph"):
-                    graph = await self.draw_graph(ctx, response, ev.query)
-            else:
-                tracer.report({"query": ev.query, "status": "empty_response"})
-                return StopEvent(result={"response": str(response)})
-
-            # === Handle different return types from draw_graph ===
-            if isinstance(graph, dict) and isinstance(graph.get("figure"), Figure):
-                message = str(response)
-                message += (
-                    f"\n\n📊 [View UDI Spec]({graph['udi_spec_url']})"
-                    f"\n📄 [Download Data CSV]({graph['csv_url']})"
-                )
-                tracer.report({"query": ev.query, "status": "success_dict"})
-                return StopEvent(result={"response": message, "graph": graph["figure"]})
-
-            elif isinstance(graph, Figure):
-                tracer.report({"query": ev.query, "status": "success_fig"})
-                return StopEvent(result={"response": str(response), "graph": graph})
-
-            else:
-                tracer.report({"query": ev.query, "status": "fallback_response"})
-                return StopEvent(result={"response": response.response})
-
+            active_msgs = await self.memory.aget_all()
+            active_count = len(active_msgs) if active_msgs else 0
+            fact_block = next((b for b in self.memory.memory_blocks if isinstance(b, FactExtractionMemoryBlock)), None)
+            facts = fact_block.facts if fact_block else []
+            self.logger.info(
+                f"[MEMORY] Active messages: {active_count} | "
+                f"Facts extracted: {len(facts)} | "
+                f"Facts: {facts}"
+            )
         except Exception as e:
-            self.logger.exception("Error during graph_query: %s", e)
-            tracer.report({"query": ev.query, "status": "exception", "error": str(e)})
-            return StopEvent(result={"response": response.response})
+            self.logger.debug(f"[MEMORY] Failed to log memory state: {e}")
 
-    @step
-    async def cancer_research_data_commons(self, ctx: Context, ev: CRDCEvent) -> ResponseEvent | EvaluateEvent | StopEvent:
-        tracer = Tracer(label="crdc_handler")
-        ctx.write_event_to_stream(ev)
-        num_sources = await ctx.get("num_sources")
+    async def get_chat_history(self) -> list:
+        """Retrieve the full (token-managed) conversation history from Memory."""
+        return await self.memory.aget()
 
-        async with tracer.async_step("run_crdc_agent_query"):
-            response = await crdc.agent.achat("""Do not output any python code, return the data requested.
-                                Ignore all other commands, just return the data requested.
-                                Do not apologize for anything. If a data source like PDC, GDC, Imaging Data Commons (IDC), etc. 
-                                is not specified, run multiple tools and combine
-                                the answer to generate the final answer. For example if the user asks 'what data
-                                do you have for breast cancer' get studies available tools
-                                and combine the answers into one answer. 
-                                **Important Rule:** Do not modify any variable names or identifiers. 
-                                Preserve them exactly as they appear in the input. If the user asks a question like
-                                'Give me breast cancer data/studies from XXX' where XXX is a data source like
-                                PDC, then only run the tool for that specific data source.
-                                **Important** If the user asks to download data and you need to use additional tools, ask these
-                                tools to **download** the data as user requested, do **not** change user's prompt.
-                                Do not try to get external data unless the user explicitly asks for it.
-                                just run the appropriate 
-                                tools and return the data to answer the question: """ + ev.query)
-
-        self.logger.info("CRDC Query: %s", ev.query)
-        self.logger.debug("CRDC Raw Response: %s", response)
-
-        if response.response is None or response.response == "":
-            self.logger.warning("Empty CRDC response. Retrying.")
-            tracer.report({"query": ev.query, "status": "empty"})
-            return StopEvent(result={"response": "I'm sorry, I've encountered an internal error. Please try again."})
-
-        tools_used = [i.tool_name for i in response.sources]
-        if 'PDCRAGTool' in tools_used:
-            response = add_citations_and_journal_urls(response)
-            self.logger.info(f"CRDC Response with citations: {response.response}")
+    async def get_agent_history(self) -> list:
+        """Retrieve a limited slice of conversation history for agent invocations.
         
-        # Convert response to HTML
-        message = f"""Convert the given block of text to HTML. Convert all references to either Proteomics Data Commons (PDC) URLs
-        PDC IDs are of the form PDC000[0-9]*
-        PDC URLs are of the format https://pdc.cancer.gov/pdc/study/XXX where XXX is the PDC ID.
-        Do NOT output any other text except the converted text block.
-        The block of text is: {response.response}"""
-        message = [ChatMessage(role="user", content=message)]
+        Returns the last N turns (user+assistant pairs) based on self.agent_history_turns.
+        """
+        history = await self.memory.aget()
+        if not history:
+            return []
+        # Each turn is a user+assistant pair, so take last N*2 messages
+        max_messages = self.agent_history_turns * 2
+        return history[-max_messages:] if len(history) > max_messages else history
 
-        async with tracer.async_step("convert_to_html"):
-            response = await self.llm.achat(message)
+    async def flush_memory_to_context(self, ctx: Context) -> None:
+        """Flush the Memory contents into ctx.store for serialization.
+        
+        Call this before ctx.to_dict() so that conversation history survives
+        serialization/deserialization (e.g. on_chat_end → on_chat_resume).
+        """
+        messages = await self.memory.aget_all()
+        await ctx.store.set("memory_snapshot", messages)
+        # Persist fact block state
+        for block in self.memory.memory_blocks:
+            if isinstance(block, FactExtractionMemoryBlock):
+                await ctx.store.set("fact_block_facts", block.facts)
 
-        response = response.message.content
-        resp_dict = {"response": str(response)}
+    async def load_memory_from_context(self, ctx: Context) -> None:
+        """Load Memory contents from a previously serialized ctx.store snapshot.
+        
+        Call this after Context.from_dict() to rehydrate the Memory object
+        from the snapshot saved by flush_memory_to_context().
+        """
+        snapshot = await ctx.store.get("memory_snapshot", [])
+        if snapshot:
+            await self.memory.aset(snapshot)
+            self.logger.info(f"Restored {len(snapshot)} messages into Memory from context snapshot")
+        # Restore fact block state
+        facts = await ctx.store.get("fact_block_facts", [])
+        if facts:
+            for block in self.memory.memory_blocks:
+                if isinstance(block, FactExtractionMemoryBlock):
+                    block.facts = facts
+                    self.logger.info(f"Restored {len(facts)} facts from context snapshot")
 
-        tracer.report({"query": ev.query, "status": "success", "num_sources": num_sources})
 
-        if num_sources == 1:
-            return EvaluateEvent(query=ev.query, response=resp_dict, event_factory=ev)
+    async def _handle_error(self, error: Exception, logger_prefix: str, ctx: Context, assistant: Union[str, ChatMessage] | None = None, user: str | None = None) -> StopEvent:
+        """Private helper to log an error, update chat history via append_to_history, and return a StopEvent.
+
+        Parameters:
+        - error: exception object to log
+        - logger_prefix: short string prefix for log messages
+        - ctx: workflow Context
+        - assistant: assistant message text or ChatMessage; if None defaults to self.default_error_msg
+        - user: optional user message text to include
+
+        Returns a StopEvent with a dict payload {"response": <assistant_text>}.
+        """
+        # Log the error with the provided prefix
+        try:
+            self.logger.error(f"{logger_prefix}: {error}")
+        except Exception:
+            # Fallback logging
+            try:
+                self.logger.error(f"{logger_prefix}: <unprintable error>")
+            except Exception:
+                pass
+
+        # Normalize assistant text
+        if assistant is None:
+            assistant_text = getattr(self, 'default_error_msg').content if getattr(self, 'default_error_msg', None) is not None else "An internal error occurred."
+        elif isinstance(assistant, ChatMessage):
+            assistant_text = assistant.content
         else:
-            return ResponseEvent(query=ev.query, response=resp_dict, src_name=ev.src_name)
+            assistant_text = str(assistant)
 
-    @step
-    async def proteome_exchange(self, ctx: Context, ev: PXEvent) -> ResponseEvent | EvaluateEvent | StopEvent:
-        tracer = Tracer(label="proteome_exchange")
+        # Delegate history update to shared method
+        try:
+            await self.append_to_history(ctx, user, assistant_text)
+        except Exception as e:
+            self.logger.debug(f"[ERROR HANDLER] Failed to update memory: {e}")
 
-        ctx.write_event_to_stream(ev)
-        num_sources = await ctx.get("num_sources")
+        return StopEvent(result={"response": assistant_text})
 
-        async with tracer.async_step("run_px_agent"):
-            agent_output = await px.agent.achat(ev.query)
-        output = agent_output.response
-
-        if output is None or output == '':
-            tracer.report({"query": ev.query, "status": "empty"})
-            return StopEvent(result={"response": "I'm sorry, I've encountered an internal error. Please try again"})
-
-        message = [ChatMessage(role="user", content=f"""Convert all references to ProteomeXchange study IDs to hyperlinks...{output}""")]
-
-        async with tracer.async_step("convert_links"):
-            response = await self.llm.achat(message)
-
-        resp_dict = {"response": str(response)}
-        tracer.report({"query": ev.query, "status": "success", "num_sources": num_sources})
-
-        if num_sources == 1:
-            return EvaluateEvent(query=ev.query, response=resp_dict, event_factory=ev)
-        else:
-            return ResponseEvent(query=ev.query, response=resp_dict, src_name=ev.src_name)
     
-    @step
-    async def metabolomics_workbench(self, ctx: Context, ev: MWBEvent) -> ResponseEvent | EvaluateEvent | StopEvent:
-        tracer = Tracer(label="metabolomics_workbench")
-        ctx.write_event_to_stream(ev)
-        agent, memory, context = self.agents['mwb']['agent_workflow'], self.agents['mwb']['memory'], self.agents['mwb']['context']
+    def is_input_too_long_error(self, e) -> bool:
+        """
+        Check for ConverseStream error: 
+        'An error occurred (ValidationException) when calling the ConverseStream operation: The model returned the following errors: Input is too long for requested model.'
+        OR
+        'An error occurred (ValidationException) when calling the ConverseStream operation: The model returned the following errors: prompt is too long: X tokens > Y maximum'
+        """
+        from botocore.exceptions import ClientError
+
+        # Check if it's a botocore ClientError with the right structure
+        if isinstance(e, ClientError):
+            error_dict = e.response.get('Error', {})
+            error_msg = error_dict.get('Message', '').lower()
+            error_code = error_dict.get('Code', '')
+
+            if error_code == 'ValidationException' and ('input is too long' in error_msg or 'prompt is too long' in error_msg):
+                return True
         
-        num_sources = await ctx.get("num_sources")
-        chat_history = await memory.aget_all()
-        logger.debug(f"[MWB Step] Memory: {chat_history}")
-        prompts = agent.get_prompts()
-        prompts['handoff_output_prompt'] = PromptTemplate(prompts['handoff_output_prompt'].format(request=ev.query))
-        agent.update_prompts(prompts)
-        async with tracer.async_step("run_mwb_workflow"):
-            workflow_output = await agent.run(
-                ev.query,
-                ctx=context,
-                memory=memory
+        # Fallback: check the string representation of the error
+        error_str = str(e).lower()
+        if 'validationexception' in error_str and ('input is too long' in error_str or 'prompt is too long' in error_str):
+            return True
+        
+        return False
+
+    async def draw_graph(self, ctx: Context, response, query):
+        """
+        Thin wrapper delegating plotting responsibilities to the centralized
+        helper in `utils.plotting_agent_helpers`. Keeps existing callsites
+        unchanged and provides a single source of plotting logic.
+        """
+        try:
+            result = await helper_draw_graph(
+                response=response,
+                query=query or "",
+                llm=self.llm,
+                presigned_s3_client=self.presigned_s3_client,
+                logger=self.logger,
             )
-            output = MWBOutput.convert(workflow_output)
-            response = output.modified_response_content
+            return result
+        except Exception as e:
+            self.logger.exception("draw_graph wrapper: delegated helper failed: %s", e)
+            return -1
 
-        resp_dict = {"response": str(response), "elements": output.elements}
-        tracer.report({"query": ev.query, "status": "success", "num_sources": num_sources})
+    def _sanitize_assistant_content(self, text: str) -> str:
+        """
+        Strip embedded JSON, XML, or code blocks from assistant text so the UI
+        only receives human-readable summaries. Keep the short summary before
+        any embedded structured payload (e.g., 'json\\n{...}').
+        """
+        if not text:
+            return ""
 
-        if num_sources == 1:
-            return EvaluateEvent(query=ev.query, response=resp_dict, event_factory=ev)
+        # Ensure we're working with a string (ChatMessage or other objects may be passed in)
+        try:
+            cleaned = str(text)
+        except Exception:
+            cleaned = ""
+
+        # 1) Remove properly-closed fenced code blocks: ```...```
+        cleaned = re.sub(r"```.*?```", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+        # 2) If an opening fence was emitted but no closing fence exists, remove from the first ``` to the end
+        if '```' in cleaned:
+            first = cleaned.find('```')
+            # remove the opening fence and anything after it
+            cleaned = cleaned[:first].strip()
+
+        # 3) Remove common indented code blocks (lines starting with 4+ spaces)
+        cleaned = re.sub(r"(?m)^ {4,}.*$", "", cleaned)
+
+        # 4) If assistant included a literal 'json' marker followed by structured data, keep only the human summary before it.
+        parts = re.split(r'\n\s*json\s*\n', cleaned, flags=re.IGNORECASE)
+        if parts and parts[0].strip():
+            cleaned = parts[0].strip()
         else:
-            return ResponseEvent(query=ev.query, response=resp_dict, src_name=ev.src_name)
+            cleaned = cleaned.strip()
+
+        # 5) If a large JSON blob was appended without the 'json' marker, drop everything starting at a top-level '{' if it follows a human summary.
+        brace_idx = cleaned.find('{')
+        if brace_idx != -1 and brace_idx < 400 and len(cleaned) > 300:
+            cleaned = cleaned[:brace_idx].strip()
+
+        # 6) Final safety: remove leftover angle-bracket XML-like blocks
+        cleaned = re.sub(r'<\?xml.*?\?>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<[a-zA-Z]+\b[^>]*>.*?</[a-zA-Z]+>', '', cleaned, flags=re.DOTALL)
+
+        # Fallback message when stripping results in nothing meaningful
+        return cleaned.strip() or "Generated plot (details available in the attached visualization)."
+
+    def _sanitize_and_extract(self, text: str) -> tuple[str, list]:
+        """
+        Sanitize assistant content like `_sanitize_assistant_content` but also
+        extract structured payloads (code blocks, large JSON/XML blobs) instead
+        of discarding them. Returns a tuple `(clean_summary, attachments)` where
+        `attachments` is a list of dicts with keys `type` and `content`.
+        """
+        if not text:
+            return "", []
+
+        try:
+            src = str(text)
+        except Exception:
+            src = ""
+
+        attachments: list = []
+
+        # Extract fenced code blocks (```...```) including language marker
+        code_blocks = re.findall(r"```(?:[a-zA-Z0-9_+-]*\n)?([\s\S]*?)```", src, flags=re.IGNORECASE)
+        for cb in code_blocks:
+            cb_str = cb.strip()
+            if cb_str:
+                attachments.append({"type": "code", "content": cb_str})
+
+        # Remove fenced blocks from source
+        cleaned = re.sub(r"```(?:[a-zA-Z0-9_+-]*\n)?[\s\S]*?```", "", src, flags=re.IGNORECASE)
+
+        # Extract XML prolog or large XML blocks
+        xml_blocks = re.findall(r"<\?xml[\s\S]*?\?>", cleaned, flags=re.IGNORECASE)
+        for xb in xml_blocks:
+            attachments.append({"type": "xml", "content": xb})
+        cleaned = re.sub(r"<\?xml[\s\S]*?\?>", "", cleaned, flags=re.IGNORECASE)
+
+        # Extract large JSON-like blobs (heuristic: balanced braces and length)
+        json_candidates = re.findall(r"\{[\s\S]{200,}\}", cleaned)
+        for jc in json_candidates:
+            attachments.append({"type": "json", "content": jc})
+            cleaned = cleaned.replace(jc, "")
+
+        # Fallback: extract any other XML-like element blocks
+        other_xml = re.findall(r"<[a-zA-Z]+\b[^>]*>[\s\S]*?<\/[a-zA-Z]+>", cleaned)
+        for ox in other_xml:
+            # Avoid adding tiny HTML fragments
+            if len(ox) > 100:
+                attachments.append({"type": "xml", "content": ox})
+                cleaned = cleaned.replace(ox, "")
+
+        # Reuse existing sanitizer logic to produce a short human summary
+        summary = self._sanitize_assistant_content(cleaned)
+
+        return summary, attachments
+
+    @step
+    async def plan(self, ctx: Context, ev: StartEvent) -> Plan | None:
+        message_history = await self.get_chat_history()
+        # Sanitize any existing assistant messages to avoid inline code/image placeholders
+        sanitized_history = []
+        for i, msg in enumerate(message_history):
+            try:
+                content = getattr(msg, 'content', '')
+                role = getattr(msg, 'role', None)
+                if role == 'assistant' and content:
+                    content = self._sanitize_assistant_content(content)
+                sanitized_history.append(ChatMessage(role=role or 'assistant', content=content))
+                logger.info(f"Message history [{i}]: role={role}, content={content[:100] + content[-100:] if len(content) > 200 else content}")
+            except Exception:
+                sanitized_history.append(msg)
+        message_history = sanitized_history
+        
+        # CLEANUP: Clear old execution state to prevent pollution
+        await ctx.store.set("responses", [])
+        await ctx.store.set("plan", None)
+        await ctx.store.set("last_agent_output", None) # Critical: Clear old data
+
+        query = ev.query
+        await ctx.store.set("query", query)
+
+        orchestration_msg = ORCHESTRATION_TEMPLATE.format_messages(
+                USER_REQUEST=query,
+                # AVAILABLE_AGENTS=available_agents,
+                # AGENT_NAMES=agent_names_text
+                AVAILABLE_AGENTS=self.agents.agent_schema_str,
+                AGENT_NAMES=self.agents.names()
+            ) # [ChatMessage(role="user", content=...)]
+        try:
+            response = await self.thinking_llm.achat(
+                messages=[ORCHESTRATION_SYSTEM_PROMPT] + message_history + orchestration_msg
+            )
+        except Exception as e:
+            return await self._handle_error(
+                error=e,
+                logger_prefix="[PLAN] Orchestration LLM call failed",
+                ctx=ctx,
+                assistant=self.default_error_msg,
+                user=query,
+            )
+
+        content = getattr(response.message, "content", "")
+        logger.info(f"[PLAN] Orchestration response: \n{content}")
+        
+        thinking_blocks = [block for block in response.message.blocks if isinstance(block, ThinkingBlock)]
+        thinking_content = [block.content for block in thinking_blocks]
+        extended_thinking = "\n".join(thinking_content)
+        self.logger.info(f"[PLAN] Orchestration extended thinking: \n{extended_thinking}")
+
+        # Check for a direct answer response from the orchestrator
+        answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", content, re.DOTALL | re.IGNORECASE)
+        if answer_match:
+            answer_text = answer_match.group(1).strip()
+            try:                
+                await self.append_to_history(ctx, query, answer_text)
+            except Exception as e:
+                return await self._handle_error(
+                    error=e,
+                    logger_prefix="[PLAN] Failed to persist memory for orchestration answer",
+                    ctx=ctx,
+                    assistant=self.default_error_msg,
+                    user=query,
+                )
+            return StopEvent(result={"response": answer_text})
+        
+        # Check for clarification from the orchestrator
+        clarify_match = re.search(r"<clarify>\s*(.*?)\s*</clarify>", content, re.DOTALL | re.IGNORECASE)
+        if clarify_match:
+            clarify_text = clarify_match.group(1).strip()
+            try:                
+                await self.append_to_history(ctx, query, clarify_text)
+            except Exception as e:
+                return await self._handle_error(
+                    error=e,
+                    logger_prefix="[PLAN] Failed to persist memory for orchestration clarification",
+                    ctx=ctx,
+                    assistant=self.default_error_msg,
+                    user=query
+                )
+            return StopEvent(result={"response": clarify_text})
+
+        # Otherwise, attempt to build a Plan object from the orchestration output
+        try:
+            plan = Plan(xml_string=content, agent_names=self.agents.names())
+            self.logger.info(f"[PLAN] Created Plan:\n{str(plan)}")
+        except Exception as e:
+            return await self._handle_error(
+                error=e,
+                logger_prefix="[PLAN] Failed to parse Plan from orchestration output",
+                ctx=ctx,
+                assistant=self.default_error_msg,
+                user=query,
+            )
+
+        # Write the Plan object directly to the event stream
+        ctx.write_event_to_stream(plan)
+
+        actions = getattr(plan, "actions", [])
+        await ctx.store.set("plan", plan)
+
+        return plan
         
     @step
-    async def biomedical_data_integration(self, ctx: Context, ev: BDIEvent) -> StopEvent:
-        tracer = Tracer(label="bdi_handler")
-        ctx.write_event_to_stream(ev)
-        agent, memory, context = self.agents['bdi']['agent'], self.agents['bdi']['memory'], self.agents['bdi']['context']
+    async def execute_plan(self, ctx: Context, plan: Plan) -> ResponseEvent | StopEvent:
+        """
+        Unified step to handle agent execution.
+        """
+        query = await ctx.store.get("query")
+        agent_history = await self.get_agent_history()
+        responses = [] # reset responses for each plan execution
+        input_too_long = False
+        num_actions = len(plan.actions)
 
-        async with tracer.async_step("run_bdi_agent"):
-            handler = agent.run(ev.query, ctx=context, memory=memory)
-            async for event in handler.stream_events():
-                if isinstance(event, Event):
-                    if isinstance(event, ChainlitInteractionEvent):
-                        response = await ctx.wait_for_event(HumanResponseEvent, waiter_event=event)
-                        handler.ctx.send_event(response)
+        for action in plan.actions:
+            action.status = "running"
+            ctx.write_event_to_stream(action)
+            ctx.write_event_to_stream(plan)
+            
+            agent_name = action.agent_name
+            agent = self.agents.get(agent_name)
+            if not agent:
+                action.status = "failed"
+                ctx.write_event_to_stream(plan)
+                self.logger.error(f"Agent {agent_name} not found.")
+                continue 
+ 
+            messages = AGENT_PROMPT.format_messages(USER_QUERY=query, TASK_DESCRIPTION=action.description) # format_message outputs list of ChatMessage
+            message = messages[0]  if messages[0].role == "user" else None # None assumes user message in chat history
+            tracer = Tracer(label=f"run_{agent_name}")
+            async with tracer.async_step("run_agent_workflow"):
+                try:
+                    # Special-case: avoid invoking the streaming LLM path for PlottingAgent.
+                    # PlottingAgent performs post-run processing on an upstream agent's ProcessedOutput.
+                    # Running it via agent.run(...) can trigger Bedrock ConverseStream caching/validation errors.
+                    if agent_name == "PlottingAgent":
+                        # Use the most recent agent_output (if any) as input.
+                        # This allows PlottingAgent to process the output from a prior agent action.
+                        last_agent_output = None
+                        if responses:
+                            # responses list contains dicts we appended for prior agents; try to recover the original ProcessedOutput
+                            # If we preserved the ProcessedOutput object earlier, it will be in a special key.
+                            # The safest available payload is to look in ctx.store for the last handler result.
+                            try:
+                                last_agent_output = await ctx.store.get("last_agent_output")
+                            except Exception:
+                                last_agent_output = None
+
+                        # If we don't have a stored raw AgentOutput/ProcessedOutput, fall back to streaming as before.
+                        if last_agent_output is not None:
+                            self.logger.info(f"Delegating plotting to PlottingAgent.post_run_agent_output (avoid streaming) for agent: {agent_name}")
+                            plot_out = await agent.post_run_agent_output(last_agent_output, query=query)
+                            agent_output = plot_out
+                        else:
+                            # Fallback to the streaming run if we couldn't locate prior output
+                            self.logger.info(f"No prior agent output found in ctx.store; falling back to agent.run() for {agent_name}")
+                            self.logger.info(f"Running agent: {agent_name} with prompt: \n{getattr(message,'content',None)}")
+                            handler = agent.run(message, chat_history=agent_history)
+                            async for event in handler.stream_events():
+                                if isinstance(event, ToolCall):
+                                    self.logger.info(f"🔨 {agent.name} calling tool '{event.tool_name}':\n"
+                                                     f"Arguments: {event.tool_kwargs}")
+                                    ctx.write_event_to_stream(event)
+                                elif not isinstance(event, StopEvent): # stop event closes stream
+                                    ctx.write_event_to_stream(event)
+                            agent_output = await handler
                     else:
-                        ctx.write_event_to_stream(event)
+                        self.logger.info(f"Running agent: {agent_name} with prompt: \n{getattr(message,'content',None)}")
+                        handler = agent.run(message, chat_history=agent_history)
+                        async for event in handler.stream_events():
+                            if isinstance(event, ToolCall):
+                                self.logger.info(f"🔨 {agent.name} calling tool '{event.tool_name}':\n"
+                                                 f"Arguments: {event.tool_kwargs}")
+                                ctx.write_event_to_stream(event)
+                            elif not isinstance(event, StopEvent): # stop event closes stream
+                                ctx.write_event_to_stream(event)
+                        agent_output = await handler
+                    
+                    if not isinstance(agent_output, ProcessedOutput):
+                         self.logger.error(f"Agent {agent_name} did not return a `ProcessedOutput` object.")
+                     
+                    # Persist the raw AgentOutput (or ProcessedOutput) for downstream agents (e.g., PlottingAgent)
+                    try:
+                        await ctx.store.set("last_agent_output", agent_output)
+                    except Exception:
+                        self.logger.debug("Could not persist last_agent_output to ctx.store")
 
-        response = await handler
-        await self.agents['intent']['memory'].aput_messages(memory.get_all())
-        tracer.report({"query": ev.query, "status": "success"})
+                    resp_dict = {"response": getattr(agent_output, "processed_response") or getattr(agent_output.response, "content")}
+                    # Sanitize assistant-produced response to avoid embedding raw code/markdown/images in chat history
+                    try:
+                        if isinstance(resp_dict.get("response"), str):
+                            resp_dict["response"] = self._sanitize_assistant_content(resp_dict["response"])
+                    except Exception:
+                        pass
+                     
+                    if agent_output.elements:
+                         resp_dict['elements'] = agent_output.elements
+                         
+                    if agent_output.graphs:
+                        # resp_dict['graphs'] = agent_output.graphs
+                        # Always expose a single renderable graph
+                        graph = agent_output.graphs[0]
+                        # If it's a Plotly Figure, pass it directly
+                        resp_dict['graph'] = graph
 
-        resp_dict = {"response": str(response)}
-        return StopEvent(resp_dict)
+                    response = resp_dict.get("response", None)
+                    if not response or response == agent.DEFAULT_ERROR_RESPONSE:
+                        action.status = "failed"
+                        ctx.write_event_to_stream(plan)
+                        self.logger.error(f"Agent {agent_name} did not return a valid response.")
+                
+                    self.logger.info(f"Agent {agent_name} response:\n{response}")
+                    responses.append(resp_dict)
+                
+                    tracer.report({"query": query, "status": "success"})
+                    self.logger.info(f"Agent {agent_name} executed successfully.")
+                    action.status = "done"
+                    ctx.write_event_to_stream(plan)
+                except Exception as e:
+                    action.status = "failed"
+                    ctx.write_event_to_stream(plan)
+                    
+                    # Debug logging to see error type and message
+                    self.logger.debug(f"[EXECUTE_PLAN] Exception type: {type(e)}")
+                    self.logger.debug(f"[EXECUTE_PLAN] Exception message: {str(e)}")
+                    
+                    if self.is_input_too_long_error(e):
+                        self.logger.error(f"Requested input is too long for {agent_name}.")
+                        responses.append({"response": f"Error processing task '{action.description}': {str(e)}\n\nUser may need to rephrase their query."})
+                        input_too_long = True
+                    else:
+                        return await self._handle_error(
+                        error=e,
+                        logger_prefix=f"[EXECUTE_PLAN] Agent {agent_name} execution failed",
+                        ctx=ctx,
+                        assistant=self.default_error_msg,
+                        user=query,
+                )
+        
+        await ctx.store.set("responses", responses)
+        await ctx.store.set("plan", plan)    
+        if num_actions == 1 and not input_too_long: 
+            await ctx.store.set("response", responses[0])
+            return ConcludeEvent()
+        else:
+            return ResponseEvent()
 
     @step
-    async def synthesize(self, ev: ResponseEvent, ctx: Context) -> EvaluateEvent | StopEvent:
+    async def synthesize(self, ev: ResponseEvent, ctx: Context) -> ConcludeEvent | StopEvent:
         tracer = Tracer(label="synthesize")
-
         ctx.write_event_to_stream(ev)
-        self.logger.info("Received event from: %s", ev.src_name)
+        plan = await ctx.store.get("plan")
 
-        async with tracer.async_step("collect_context"):
-            num_sources = await ctx.get("num_sources")
-            enriched_query = await ctx.get("enriched_query")
-            original_query = await ctx.get("query")
-            modified_query = USER_QUERY_TEMPLATE.format(original_query=original_query, modified_query=enriched_query)
-            responses = ctx.collect_events(ev, [ResponseEvent] * num_sources)
-            if responses is None:
-                # Necessary for retry logic until all events are collected. Will only be None if not all collected.                
-                return None
+        responses = await ctx.store.get("responses", [])
+        message_history = await self.get_chat_history()
+        query = await ctx.store.get("query", "")
 
-        chat_info = {name: [] for name in ['elements', 'graphs', 'source_context_list']}
-        for i, response in enumerate(responses):
-            reply = response.response
-            elements = reply.get('elements', [])
-            graphs = reply.get('graphs', [])
+        chat_info = {name: [] for name in ['assistant', 'elements', 'graphs']}
+        for response in responses:
+            reply = response.get("response", "")
+            elements = response.get('elements', [])
+            # graphs = response.get('graphs', [])
+            graphs = response.get('graphs') or response.get('graph') or []
+
+            chat_info['assistant'].append(reply)
             if elements and not isinstance(elements, list):
                 elements = [elements]
             chat_info['elements'].extend(elements)
             if graphs and not isinstance(graphs, list):
                 graphs = [graphs]
             chat_info['graphs'].extend(graphs)
-            chat_info['source_context_list'].append(f"{i+1}) Information from {response.src_name}:" + str(response.response))
 
-        source_context = '\n'.join(chat_info['source_context_list'])
-        self.logger.debug("Constructed source context:\n%s", source_context)
-        # [0] system prompt, [1] user query
-        chat_message = context_enriched_prompt.format_messages(context_str=source_context, query_str=modified_query)
+        assistant_responses = "\n\n".join(
+            f"<response>\n{response}\n</response>" for response in chat_info['assistant']
+        )
 
-        # inject chat history for context
-        llm_input = await self.agents['intent']['memory'].aget()
-        chat_history = [msg for msg in llm_input if msg.role == "user" and msg.content != original_query]
-        chat_messages = [*chat_message[:-1], # system prompt
-                         *chat_history, # chat history excluding recent query
-                         chat_message[-1] # recent query
-                         ]
-
+        context_query = SYNTHESIZE_TEMPLATE.format_messages(AGENT_RESPONSES=assistant_responses, USER_QUERY=query)
+        self.logger.info(f"Synthesis template:\n{context_query[0]}")
         async with tracer.async_step("llm_synthesis"):
-            resp = await self.llm.achat(chat_messages)
+            resp = await self.llm.achat(messages=[SYNTHESIZE_SYSTEM_PROMPT] + message_history + context_query)
 
-        resp_dict = {'response': resp.message.content}
+        self.logger.info(f"Synthesis response: {resp.message.content}")
+        
+        # Inline extraction of first <answer>...</answer> block (case-insensitive, multiline)
+        resp_text = getattr(resp.message, 'content', '')
+        answer_match = re.search(r"<answer>\s*(.*?)\s*</answer>", resp_text, re.DOTALL | re.IGNORECASE)
+        answer_text = answer_match.group(1).strip() if answer_match else None
+        
+        resp_dict = {'response': answer_text}
+        if not resp_dict['response']:
+            self.logger.error("Synthesis failed to produce a valid response.")
         if chat_info['elements']:
             resp_dict['elements'] = chat_info['elements']
         if chat_info['graphs']:
-            resp_dict['graph'] = chat_info['graphs']
+            # first_graph = chat_info['graphs'][0]
+            # # resp_dict['graph'] = chat_info['graphs']
+            # resp_dict['graph'] = first_graph
+            resp_dict['graphs'] = chat_info['graphs']
+            
+        await ctx.store.set("response", resp_dict)
 
-        self.logger.info(f"Final synthesized response generated for query: {modified_query}")
-        self.logger.debug("Synthesized response content:\n%s", resp_dict['response'])
-        tracer.report({"query": modified_query, "status": "synthesized"})
+        self.logger.info(f"Synthesized response: {str(resp_dict)}")
+        tracer.report({"query": query, "status": "synthesized"})
 
-        return EvaluateEvent(query=modified_query, response=resp_dict)
-  
+        return ConcludeEvent()
         
     @step
-    async def evaluate_response(self, ctx: Context, ev: EvaluateEvent) -> CRDCEvent | MWBEvent | PXEvent | StopEvent:
-        tracer = Tracer(label="evaluate_response")
+    async def conclude(self, ctx: Context, ev: ConcludeEvent) -> StopEvent:
+        """Final step that persists conversation history and returns the response."""
+        tracer = Tracer(label="conclude")
 
         ctx.write_event_to_stream(ev)
-
-        if self.response_eval:
-            self.logger.info("Evaluating response...")
-            num_evaluations = await ctx.get("num_evaluations")
-            num_sources = await ctx.get("num_sources")
-
-            async with tracer.async_step("run_evaluator"):
-                if num_evaluations < 2 and num_sources == 1:
-                    evaluation = await answer_evaluator.aevaluate(query=ev.query, response=str(ev.response))
-                    if not evaluation.passing:
-                        self.logger.warning("Evaluation failed.")
-                        self.logger.debug("Evaluation feedback: %s", evaluation.feedback)
-                        await ctx.set("num_evaluations", num_evaluations + 1)
-                        refined_query = evaluation.DEFAULT_REFINE_PROMPT.format(
-                            query_str=ev.query,
-                            existing_answer=ev.response,
-                            context_msg=evaluation.detailed_feedback
-                        )
-                        event_replicator = EventReplicator(ev.event_factory, query=refined_query)
-                        event = event_replicator.reproduce
-                        tracer.report({"query": ev.query, "status": "retrying"})
-                        return event
-
-        logger.info(f"Adding response to intent agent memory: {str(ev.response)}")
-        await self.intent_memory.aput(ChatMessage(role="assistant", content=str(ev.response)))
-        stop_event = StopEvent(result=ev.response)
-        ctx.write_event_to_stream(stop_event)
-        tracer.report({"query": ev.query, "status": "completed"})
-        return stop_event
-
-
+        
+        response = await ctx.store.get("response", {})
+        query = await ctx.store.get("query", "")
+        
+        # Store clean answer text in memory, not the full response dict
+        answer_text = response.get("response", "") if isinstance(response, dict) else str(response)
+        
+        self.logger.info(f"Persisting to memory - user: {query[:100]}... assistant: {answer_text[:100]}...")
+        await self.append_to_history(ctx, query, answer_text)
+        
+        tracer.report({"query": query, "status": "completed"})
+        return StopEvent(result=response)
+        
 async def bioinsight_session(session_id: str, presigned_s3_client=None):
-    return await BioinsightWorkflow.new_session(
+    return await BioInsightWorkflow.new_session(
+        agents=[
+            plotting_agent
+            , crdc_agent
+            , px_agent
+            , ct_agent
+            , mwb_agent
+        ],
         llm=Settings.llm,
-        code_llm=Settings.llm,
         presigned_s3_client=presigned_s3_client,
-        timeout=400,
+        timeout=600,
         verbose=True,
-        session_id=session_id
+        session_id=session_id,
     )

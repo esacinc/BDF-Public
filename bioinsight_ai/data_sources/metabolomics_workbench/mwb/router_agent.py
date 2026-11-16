@@ -1,4 +1,4 @@
-from llama_index.core.agent.workflow import FunctionAgent
+from agents.bioinsight_agent import BioInsightAgent
 from workflow_config.default_settings import Settings
 
 #
@@ -7,7 +7,7 @@ from workflow_config.default_settings import Settings
 # or the RAG Agent for general questions
 #
 
-router_agent = FunctionAgent(
+router_agent = BioInsightAgent(
     name="Router Agent",
     description=(
         "This agent does not answer user queries directly. Instead, it analyzes the query and determines which agent "

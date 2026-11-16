@@ -1,0 +1,323 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = 'us-east-1'
+    APP_PATH = 'bioinsight_ai'
+    DOCKER_BUILDKIT = '1'          // ✅ Enable BuildKit globally for cache support
+  }
+
+  stages {
+    stage('Disk Space Check') {
+      steps {
+        sh '''
+          echo ">>> Checking disk usage before build"
+          df -h /var/lib/jenkins
+
+          USAGE=$(df /var/lib/jenkins | awk 'NR==2 {print $5}' | sed 's/%//')
+          echo "Current usage: ${USAGE}%"
+
+          if [ "$USAGE" -ge 90 ]; then
+            echo "🧨 CRITICAL: Disk usage ${USAGE}% >= 90%. Performing full prune (including volumes)."
+            docker system prune -af --volumes || true
+            docker builder prune -af || true
+            echo "✅ Full prune completed. Current usage:"
+            df -h /var/lib/jenkins
+            docker system df
+          elif [ "$USAGE" -ge 85 ]; then
+            echo "⚠️  WARNING: Disk usage ${USAGE}% >= 85%. Performing light cleanup (no volumes)."
+            docker system prune -af || true
+            docker builder prune -af || true
+            echo "✅ Light cleanup completed. Current usage:"
+            df -h /var/lib/jenkins
+            docker system df
+          else
+            echo "✅ Disk usage OK (${USAGE}%). Skipping Docker prune to preserve cache."
+          fi
+        '''
+      }
+    }
+
+    // 🧹 Removed destructive Pre-clean and Cleanup Docker stages to preserve layer cache
+
+    stage('Checkout & Set DEPLOY_ENV') {
+      steps {
+        checkout scm
+
+        //Make sure Jenkins has full history + all tags
+        sh '''
+          echo ">> Making sure repo is unshallowed (if it was a shallow clone)"
+          git fetch --unshallow 2>/dev/null || true
+
+          echo ">> Fetching all tags from origin"
+          git fetch origin --tags --force --prune || true
+
+          echo ">> Current HEAD:"
+          git log -1 --oneline --decorate || true
+
+          echo ">> Tags pointing at HEAD:"
+          git tag --points-at HEAD || true
+        '''
+
+        withCredentials([usernamePassword(
+          credentialsId: '<Credentials ID>',
+          usernameVariable: 'GITHUB_USER',
+          passwordVariable: 'GITHUB_TOKEN'
+        )]) {
+          sh '''
+            echo ">> Fixing core.hooksPath if needed"
+            git config core.hooksPath .git/hooks
+
+            echo ">> Initializing Git LFS"
+            git lfs install
+
+            echo ">> Forcing HTTPS for LFS"
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+            echo ">> Setting up HTTPS credentials for GitHub LFS"
+            git config --global credential.helper store
+
+            echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
+
+            echo ">> Verifying ~/.git-credentials"
+            cat ~/.git-credentials
+
+            echo ">> Pulling LFS files..."
+            git lfs pull
+
+            echo ">> Cleaning up credentials"
+            rm -f ~/.git-credentials
+          '''
+        }
+        script {
+          def branchName = env.BRANCH_NAME
+          echo "Git Branch Detected: ${branchName}"
+          def deployEnv = ''
+          if (branchName == 'develop') {
+            deployEnv = 'dev'
+          } else if (branchName.startsWith('release/')) {
+            deployEnv = 'stage'
+          } else if (branchName == 'main') {
+            def tag = sh(script: "git describe --tags --exact-match || echo ''", returnStdout: true).trim()
+            echo "Detected tag on main: '${tag}'"
+            if (tag.startsWith('v')) {
+              deployEnv = 'prod'
+            } else {
+              echo "Main branch is not tagged. Skipping prod deployment."
+              currentBuild.result = 'SUCCESS'
+              error("Production deployment skipped — tag required (vX.Y.Z).")
+            }
+          } else {
+            echo "Branch ${branchName} is not configured for deployment."
+            currentBuild.result = 'SUCCESS'
+            error("Skipping deployment for unsupported branch: ${branchName}")
+          }
+          env.DEPLOY_ENV = deployEnv
+          echo "Deployment environment set to: ${env.DEPLOY_ENV}"
+        }
+      }
+    }
+
+    stage('Load Secrets & Write .env.runtime') {
+      steps {
+        dir("${env.APP_PATH}") {
+          script {
+            def secretName = "bdf-chatbot-${env.DEPLOY_ENV}-env"
+            def secretJson = sh(script: "aws secretsmanager get-secret-value --secret-id ${secretName} --query SecretString --output text", returnStdout: true).trim()
+            def secrets = readJSON text: secretJson
+            def envContent = """
+              APP_ENV=${secrets.APP_ENV}
+              MODEL_ID=${secrets.MODEL_ID}
+              CHAINLIT_HOST=${secrets.CHAINLIT_HOST}
+              LOG_LEVEL=${secrets.LOG_LEVEL}
+              CHAINLIT_PORT=${secrets.CHAINLIT_PORT}
+              CHAINLIT_URL=${secrets.CHAINLIT_URL}
+              AWS_ACCESS_KEY_ID=${secrets.AWS_ACCESS_KEY_ID}
+              AWS_SECRET_ACCESS_KEY=${secrets.AWS_SECRET_ACCESS_KEY}
+              AWS_REGION=${secrets.AWS_REGION}
+              PUBLICATIONS_KB_ID=${secrets.PUBLICATIONS_KB_ID}
+              PUBLICATIONS_DOCS_SOURCE_ID=${secrets.PUBLICATIONS_DOCS_SOURCE_ID}
+              PUBLICATIONS_FAQ_S3_SOURCE_ID=${secrets.PUBLICATIONS_FAQ_S3_SOURCE_ID}
+              PUBLICATIONS_FAQ_WEB_SOURCE_ID=${secrets.PUBLICATIONS_FAQ_WEB_SOURCE_ID}
+              PUBLICATIONS_PAPERS_SOURCE_ID=${secrets.PUBLICATIONS_PAPERS_SOURCE_ID}
+              DEFAULT_MODEL=${secrets.DEFAULT_MODEL}
+              DATA_LAYER_TABLE=${secrets.DATA_LAYER_TABLE}
+              FEEDBACK_TABLE=${secrets.FEEDBACK_TABLE}
+              DEPLOY_ENV=${env.DEPLOY_ENV}
+              MWB_KB_ID=${secrets.MWB_KB_ID}
+              OPENAI_API_KEY=${secrets.OPENAI_API_KEY}
+              OPENAI_MODEL_NAME=${secrets.OPENAI_MODEL_NAME}
+              CHAINLIT_STORAGE_BUCKET=${secrets.CHAINLIT_STORAGE_BUCKET}
+              MWB_SOURCE_ID=${secrets.MWB_SOURCE_ID}
+              GDC_BASE_API=${secrets.GDC_BASE_API}
+              APPROVED_USERS_TABLE=${secrets.APPROVED_USERS_TABLE}
+              PENDING_USERS_TABLE=${secrets.PENDING_USERS_TABLE}
+              JWT_SECRET=${secrets.JWT_SECRET}
+              JWT_ALGORITHM=${secrets.JWT_ALGORITHM}
+              CHAINLIT_AUTH_SECRET=${secrets.CHAINLIT_AUTH_SECRET}
+              OAUTH_GOOGLE_CLIENT_SECRET=${secrets.OAUTH_GOOGLE_CLIENT_SECRET}
+              OAUTH_GOOGLE_CLIENT_ID=${secrets.OAUTH_GOOGLE_CLIENT_ID}
+              OAUTH_GOOGLE_REDIRECT_URI=${secrets.OAUTH_GOOGLE_REDIRECT_URI}
+              APP_LOGIN_URL=${secrets.APP_LOGIN_URL}
+              NEXT_PUBLIC_API_BASE=${secrets.NEXT_PUBLIC_API_BASE}
+              COOKIE_SECURE=${secrets.COOKIE_SECURE}
+              COOKIE_DOMAIN=${secrets.COOKIE_DOMAIN}
+            """.stripIndent()
+            writeFile file: ".env.runtime", text: envContent
+            echo ".env.runtime written for ${env.DEPLOY_ENV}"
+            sh "ls -l .env.runtime || (echo '.env.runtime missing!' && exit 1)"
+          }
+        }
+      }
+    }
+
+    stage('Build & Push Docker Image to ECR') {
+      steps {
+        script {
+          def accountId = sh(script: "aws sts get-caller-identity --query Account --output text", returnStdout: true).trim()
+          def repoName = "bdf-chatbot-${env.DEPLOY_ENV}"
+          def ecrUrl = "${accountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/${repoName}"
+
+          // Login to ECR
+          sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ecrUrl}"
+          sh "docker pull ${ecrUrl}:cache || true"
+
+          // Resolve build arg
+          def apiBase = sh(script: "grep NEXT_PUBLIC_API_BASE ${APP_PATH}/.env.runtime | cut -d '=' -f2", returnStdout: true).trim()
+          echo "🌍 NEXT_PUBLIC_API_BASE resolved to: ${apiBase}"
+
+          // Build with Buildx (full cache)
+          sh """
+            echo ">> Building Docker image with Buildx and registry cache"
+            docker buildx build \
+              --builder jenkins_builder \
+              --progress=plain \
+              --platform linux/amd64 \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --build-arg NEXT_PUBLIC_API_BASE=${apiBase} \
+              --cache-from=type=registry,ref=${ecrUrl}:cache \
+              --cache-to=type=registry,ref=${ecrUrl}:cache,mode=max \
+              -t ${ecrUrl}:latest ${APP_PATH} \
+              --push
+          """
+
+          // Optional diagnostics
+          sh 'docker system df'
+        }
+      }
+    }
+
+    stage('Debug: Verify AppSpec & Scripts') {
+      steps {
+        script {
+          echo "Current workspace: ${pwd()}"
+          sh '''
+            echo ">>> Listing top-level directory contents:"
+            ls -alh
+            echo ">>> Checking appspec.yml:"
+            find . -name 'appspec.yml'
+            echo ">>> Checking scripts/ directory:"
+            find . -type d -name scripts
+          '''
+        }
+      }
+    }
+
+    stage('Package AppSpec & Scripts') {
+      steps {
+        script {
+          def artifactName = "bdf-chatbot-${env.DEPLOY_ENV}.zip"
+          def buildDir = "${env.WORKSPACE}/build"
+          def sourceDir = "${APP_PATH}"
+          sh """
+            echo ">> Cleaning and preparing build directory"
+            rm -rf ${buildDir}
+            mkdir -p ${buildDir}
+            echo ">> Copying source files"
+            cp -r ${sourceDir}/* ${buildDir}/ || true
+            echo ">> Copying deployment files"
+            cp ${sourceDir}/.env.runtime ${buildDir}/
+            cp ${sourceDir}/appspec.yml ${buildDir}/
+            cp -r ${sourceDir}/scripts ${buildDir}/
+            echo ">> Creating ZIP: ${artifactName}"
+            cd ${buildDir} && zip -r ${artifactName} . && mv ${artifactName} ../
+            echo ">> Final ZIP location: ${env.WORKSPACE}/${artifactName}"
+            unzip -l ../${artifactName}
+          """
+        }
+      }
+    }
+
+    stage('Upload AppSpec ZIP to S3') {
+      steps {
+        script {
+          def artifactName = "bdf-chatbot-${env.DEPLOY_ENV}.zip"
+          def s3Key = "${env.DEPLOY_ENV}/bdf-chatbot.zip"
+          sh """
+            echo ">> Checking ZIP before upload..."
+            ls -l ${artifactName} || (echo 'ZIP file not found!' && exit 1)
+            echo ">> Uploading ${artifactName} to s3://${s3Key}"
+            aws s3 cp ${artifactName} s3://bdf-chatbot-deployments/${s3Key} --region ${AWS_REGION}
+            echo ">> Deleting local ZIP after upload"
+            rm -f ${artifactName}
+          """
+        }
+      }
+    }
+
+    stage('Deploy with CodeDeploy') {
+      steps {
+        script {
+          def s3Key = "${env.DEPLOY_ENV}/bdf-chatbot.zip"
+          def deployGroupName = "BDF-Chatbot-${env.DEPLOY_ENV}-Deployment-Group"
+          def applicationName = "BDF-Chatbot-CodeDeploy"
+          echo ">> Triggering CodeDeploy deployment..."
+          def deployJson = sh(script: """
+            aws deploy create-deployment \
+              --application-name ${applicationName} \
+              --deployment-group-name ${deployGroupName} \
+              --s3-location bucket=bdf-chatbot-deployments,bundleType=zip,key=${s3Key} \
+              --deployment-config-name CodeDeployDefault.AllAtOnce \
+              --region ${AWS_REGION} \
+              --output json
+          """, returnStdout: true).trim()
+          def deploymentId = readJSON text: deployJson
+          echo ">> Deployment ID: ${deploymentId.deploymentId}"
+          echo ">> Waiting for deployment to complete..."
+          sh "aws deploy wait deployment-successful --deployment-id ${deploymentId.deploymentId} --region ${AWS_REGION}"
+        }
+      }
+    }
+
+    stage('Final Cleanup') {
+      steps {
+        sh '''
+          echo ">> Cleaning up build artifacts and workspace"
+          rm -rf build/
+          rm -f *.zip
+          df -h
+          docker system df
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "Post-build cleanup..."
+      // ✅ Keep local cleanup only, avoid pruning Docker cache
+      sh 'rm -f *.zip || true'
+      sh 'rm -rf build/ || true'
+      sh 'df -h'
+      sh 'docker system df'
+    }
+    success {
+      script {
+        echo "Deployment completed for ${env.DEPLOY_ENV} environment."
+      }
+    }
+    failure {
+      echo "Pipeline failed. Please check the logs above."
+    }
+  }
+}
